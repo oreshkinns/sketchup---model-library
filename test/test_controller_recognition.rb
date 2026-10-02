@@ -92,6 +92,32 @@ class SerializedControllerDefinitions < Array
 end
 
 class ControllerRecognitionTest < Minitest::Test
+  def test_version_callback_resolves_scope_when_personal_and_shared_ids_collide
+    select
+    entry = @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    FileUtils.cp_r(@catalogs.catalog('personal').root, @catalogs.catalog('shared').root)
+    callback = @dialog.callbacks.fetch('update_catalog_version')
+    callback.call(nil, entry['id'], @definition.object_id.to_s, 'personal')
+    assert_equal 2, @catalogs.catalog('personal').find(entry['id'])['version']
+    assert_equal 1, @catalogs.catalog('shared').find(entry['id'])['version']
+    @definition.set_attribute('MafLibrary', 'catalog_scope', 'shared')
+    @controller.send(:refresh)
+    callback.call(nil, entry['id'], @definition.object_id.to_s, 'shared')
+    assert_equal 2, @catalogs.catalog('shared').find(entry['id'])['version']
+    assert_equal 2, @catalogs.catalog('personal').find(entry['id'])['version']
+  end
+
+  def test_scoped_version_callback_cannot_update_cloud_card_with_local_id_collision
+    select
+    entry = @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    remote = Struct.new(:entries).new([entry.merge('scope' => 'cloud')])
+    @controller.define_singleton_method(:cloud) { remote }
+    @controller.send(:update_catalog_version, entry['id'], @definition, 'cloud')
+    flunk 'Cloud update must be rejected'
+  rescue ArgumentError
+    assert_equal 1, @catalogs.catalog('personal').find(entry['id'])['version']
+  end
+
   def setup
     @dir = Dir.mktmpdir
     @settings = MafLibrary::Settings.new(File.join(@dir, 'settings.json'),

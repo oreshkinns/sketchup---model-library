@@ -10,16 +10,17 @@ module MafLibrary
     POINT_TOLERANCE_INCHES = 0.001
     TRANSFORM_TOLERANCE = 0.000001
 
+    # A reader belongs to one analysis pass; create a new reader after edits.
     def initialize(mode: :duplicate)
       raise ArgumentError, 'Unknown signature mode' unless [:duplicate, :catalog].include?(mode)
       @mode = mode
+      @signature_cache = {}
+      @signature_complete = {}
+      @signature_sampled = {}
     end
 
     def call(definition)
       @uncertain = false
-      @signature_cache = {}
-      @signature_complete = {}
-      @signature_sampled = {}
       digest = signature(definition, [])
       {digest: digest, complete: !!@signature_complete[definition.object_id] && !@uncertain, sampled: !!@signature_sampled[definition.object_id]}
     end
@@ -30,6 +31,8 @@ module MafLibrary
       id = definition.object_id
       return @signature_cache[id] if @signature_cache.key?(id)
       return nil if stack.include?(id)
+      previous_uncertain = @uncertain
+      @uncertain = false
       entities = definition.entities
       length = entities.length
       indexes = if length <= SIGNATURE_SAMPLE_LIMIT
@@ -46,18 +49,20 @@ module MafLibrary
         (entity.is_a?(Sketchup::ComponentInstance) || entity.is_a?(Sketchup::Group)) &&
           @signature_sampled[entity.definition.object_id]
       end
-      @signature_complete[id] = complete && !@signature_sampled[id]
       evidence = [length, bounds_token(definition), attributes_token(definition),
                                                        (@mode == :duplicate ? library_metadata_token(definition) : []),
                                                        behavior_token(definition), tokens.sort_by(&:to_s)]
       if @mode == :catalog
         evidence << (definition.respond_to?(:insertion_point) ? point_token(definition.insertion_point) : [])
       end
+      @signature_complete[id] = complete && !@signature_sampled[id] && !@uncertain
       value = Digest::SHA256.hexdigest(JSON.generate(evidence))
       @signature_cache[id] = value
     rescue StandardError
       @signature_complete[id] = false
       @signature_cache[id] = nil
+    ensure
+      @uncertain = previous_uncertain || @uncertain if defined?(previous_uncertain) && !previous_uncertain.nil?
     end
 
     def bounds_token(definition)

@@ -22,6 +22,7 @@ module MafLibrary
     end
 
     def scan
+      @duplicate_signature = DefinitionSignature.new(mode: :duplicate)
       @definitions = {}
       @signature_cache = {}
       @signature_sampled = {}
@@ -100,7 +101,7 @@ module MafLibrary
     end
 
     def signature(definition, _stack)
-      result = DefinitionSignature.new(mode: :duplicate).call(definition)
+      result = @duplicate_signature.call(definition)
       id = definition.object_id
       @signature_cache[id] = result[:digest]
       @signature_complete[id] = result[:complete]

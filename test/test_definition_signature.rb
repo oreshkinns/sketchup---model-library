@@ -2,6 +2,21 @@ module Sketchup; class ModelObserver; end; end
 require_relative 'test_core'
 
 class DefinitionSignatureTest < Minitest::Test
+  def test_shared_nested_signature_is_read_once_per_mode_without_certifying_incomplete_evidence
+    reads = 0
+    leaf = FakeDefinition.new('Shared', [FakeEdge.new])
+    leaf.define_singleton_method(:behavior) { reads += 1; raise 'unreadable behavior' }
+    first = FakeDefinition.new('First', [Sketchup::ComponentInstance.new(leaf)])
+    second = FakeDefinition.new('Second', [Sketchup::ComponentInstance.new(leaf)])
+    reader = MafLibrary::DefinitionSignature.new(mode: :catalog)
+    refute reader.call(first)[:complete]
+    refute reader.call(second)[:complete]
+    refute reader.call(leaf)[:complete]
+    assert_equal 1, reads
+    valid = FakeDefinition.new('Valid', [FakeEdge.new])
+    assert reader.call(valid)[:complete], 'Uncertainty must stay with the affected definition'
+  end
+
   def fingerprint(definition)
     MafLibrary::DefinitionSignature.new(mode: :catalog).call(definition)
   end

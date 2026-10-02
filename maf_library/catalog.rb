@@ -101,7 +101,7 @@ module MafLibrary
       manifest_backup = "#{manifest_path}.#{token}.rollback"
       original_manifest = File.file?(manifest_path) ? manifest_path : "#{manifest_path}.bak"
       FileUtils.cp(original_manifest, manifest_backup)
-      saved = definition.respond_to?(:save_copy) ? definition.save_copy(candidate) : definition.save_as(candidate)
+      saved = save_version_copy(definition, candidate)
       raise 'SketchUp не сохранил компонент' unless saved && File.file?(candidate)
       signature = DefinitionSignature.new(mode: :catalog).call(definition)
       entry.merge!(Metadata.for_definition(definition))
@@ -257,6 +257,27 @@ module MafLibrary
     end
 
     private
+
+    def save_version_copy(definition, destination)
+      return definition.save_copy(destination) if definition.respond_to?(:save_copy)
+      # SketchUp 2021 save_as permanently changes the definition's file path.
+      # Export a unique temporary definition and abort only our own operation.
+      current = definition.model
+      started = current.start_operation('Подготовить копию версии МАФ', true)
+      raise 'SketchUp не начал экспорт копии компонента' unless started
+      begin
+        transformation = Geom::Transformation.new
+        # Two instances also force make_unique when the source is unused.
+        current.entities.add_instance(definition, transformation)
+        instance = current.entities.add_instance(definition, transformation)
+        instance.make_unique
+        copy = instance.definition
+        raise 'SketchUp не создал независимую копию компонента' if copy == definition
+        copy.save_as(destination)
+      ensure
+        current.abort_operation
+      end
+    end
 
     def write_thumbnail(id, bytes, ext)
       raise ArgumentError, 'Модель не найдена в каталоге' unless find(id)

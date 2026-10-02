@@ -15,13 +15,15 @@ module MafLibrary
     end
 
     def apply
+      fingerprint_reader = DefinitionSignature.new(mode: :catalog)
+      @geometry_cache = {}
       rows = Array(@report['models'])
       @evidence = {}
       rows.each do |row|
         item = reference_for(row)
         definition = item && item[:definition]
         refs = item ? item[:refs].values.map { |ref| ref[:entity] } : []
-        result = definition ? DefinitionSignature.new(mode: :catalog).call(definition) : {}
+        result = definition ? fingerprint_reader.call(definition) : {}
         row['recognition_fingerprint'] = result[:digest]
         row['recognition_complete'] = result[:complete] == true && result[:sampled] != true
         row['recognition_sampled'] = result[:sampled] == true
@@ -201,17 +203,31 @@ module MafLibrary
     def collect_geometry(definition, ancestors, depth, metadata, materials)
       return if ancestors.include?(definition.object_id)
       metadata['nesting_depth'] = [metadata['nesting_depth'], depth].max
-      add_materials(definition, materials)
-      definition.entities.each do |entity|
-        add_materials(entity, materials)
-        if entity.is_a?(Sketchup::Face)
-          metadata['faces_count'] += 1
-        elsif entity.is_a?(Sketchup::Edge)
-          metadata['edges_count'] += 1
-        elsif entity.is_a?(Sketchup::ComponentInstance) || entity.is_a?(Sketchup::Group)
-          collect_flags(entity.definition, [entity], metadata['behavior_flags'])
-          collect_geometry(entity.definition, ancestors + [definition.object_id], depth + 1, metadata, materials)
+      geometry = local_geometry(definition)
+      materials.merge!(geometry[:materials])
+      metadata['faces_count'] += geometry[:faces]
+      metadata['edges_count'] += geometry[:edges]
+      geometry[:children].each do |entity|
+        collect_flags(entity.definition, [entity], metadata['behavior_flags'])
+        collect_geometry(entity.definition, ancestors + [definition.object_id], depth + 1, metadata, materials)
+      end
+    end
+
+    # Cache physical geometry, then aggregate it along each actual nested path.
+    # Repeated instances still contribute separately to parameter counts.
+    def local_geometry(definition)
+      @geometry_cache[definition.object_id] ||= begin
+        result = {faces: 0, edges: 0, materials: {}, children: []}
+        add_materials(definition, result[:materials])
+        definition.entities.each do |entity|
+          add_materials(entity, result[:materials])
+          result[:faces] += 1 if entity.is_a?(Sketchup::Face)
+          result[:edges] += 1 if entity.is_a?(Sketchup::Edge)
+          if entity.is_a?(Sketchup::ComponentInstance) || entity.is_a?(Sketchup::Group)
+            result[:children] << entity
+          end
         end
+        result
       end
     end
 

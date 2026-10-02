@@ -2,7 +2,8 @@ module MafLibrary
   module Metadata
     def self.for_definition(definition)
       bounds = definition.bounds if definition.respond_to?(:bounds)
-      result = {'bbox_mm' => bounds && [bounds.width, bounds.depth, bounds.height].map { |v| v.respond_to?(:to_mm) ? v.to_mm.to_f.round(1) : v.to_f },
+      # BoundingBox.height is Y (physical depth); .depth is vertical Z.
+      result = {'bbox_mm' => bounds && [bounds.width, bounds.height, bounds.depth].map { |v| v.respond_to?(:to_mm) ? v.to_mm.to_f.round(1) : v.to_f },
                 'faces_count' => 0, 'edges_count' => 0, 'materials_count' => 0}
       materials = {}
       walk(definition.entities, result, materials, {})

@@ -318,7 +318,7 @@ end
 
 class MetadataTest < Minitest::Test
   def test_reports_dimensions_and_nested_geometry_without_recursing_forever
-    bounds = Struct.new(:width, :depth, :height).new(1000, 500, 750)
+    bounds = Struct.new(:width, :height, :depth).new(1000, 500, 750)
     child = FakeDefinition.new('child', [Sketchup::Face.new, Sketchup::Edge.new])
     root = FakeDefinition.new('root', [Sketchup::ComponentInstance.new(child)])
     root.define_singleton_method(:bounds) { bounds }
@@ -830,6 +830,58 @@ class ControllerTest < Minitest::Test
 end
 
 class CatalogVersionTest < Minitest::Test
+  def legacy_definition
+    source_path = File.join(@dir, 'original.skp')
+    File.binwrite(source_path, 'original file')
+    legacy_model = LegacyExportModel.new
+    definition = LegacyExportDefinition.new('After', @definition.entities, legacy_model, source_path)
+    legacy_model.entities << Sketchup::ComponentInstance.new(definition)
+    definition
+  end
+
+  def test_legacy_version_export_preserves_original_path_and_model_on_success
+    definition = legacy_definition
+    original_entities = definition.model.entities.dup
+    @catalog.update_definition_version(@entry['id'], definition)
+    assert_equal File.join(@dir, 'original.skp'), definition.path
+    assert_equal 'original file', File.binread(definition.path)
+    assert_equal original_entities, definition.model.entities
+    assert_equal 'saved:After', File.binread(@path)
+    assert_equal 2, @catalog.find(@entry['id'])['version']
+  end
+
+  def test_legacy_version_export_preserves_original_path_on_manifest_rollback
+    definition = legacy_definition
+    original_entities = definition.model.entities.dup
+    @catalog.define_singleton_method(:save) { |items| super(items); raise IOError, 'after manifest commit' }
+    assert_raises(IOError) { @catalog.update_definition_version(@entry['id'], definition) }
+    assert_equal File.join(@dir, 'original.skp'), definition.path
+    assert_equal 'original file', File.binread(definition.path)
+    assert_equal original_entities, definition.model.entities
+    assert_equal 'saved:Before', File.binread(@path)
+    assert_equal @before_manifest, File.binread(@manifest)
+  end
+
+  def test_legacy_version_export_for_unused_definition_still_saves_an_independent_copy
+    definition = legacy_definition
+    definition.model.entities.clear
+    @catalog.update_definition_version(@entry['id'], definition)
+    assert_equal File.join(@dir, 'original.skp'), definition.path
+    assert_empty definition.model.entities
+    assert_equal 'saved:After', File.binread(@path)
+  end
+
+  def test_legacy_version_export_aborts_when_make_unique_returns_original
+    definition = legacy_definition
+    definition.model.decline_unique = true
+    original_entities = definition.model.entities.dup
+    assert_raises(RuntimeError) { @catalog.update_definition_version(@entry['id'], definition) }
+    assert_equal File.join(@dir, 'original.skp'), definition.path
+    assert_equal original_entities, definition.model.entities
+    assert_equal 'saved:Before', File.binread(@path)
+    assert_equal @before_manifest, File.binread(@manifest)
+  end
+
   def setup
     @dir = Dir.mktmpdir
     @catalog = MafLibrary::Catalog.new(@dir)
@@ -886,6 +938,54 @@ class CatalogVersionTest < Minitest::Test
     assert_equal @before_manifest, File.binread(@manifest)
     assert_equal [File.basename(@path)], Dir.children(File.dirname(@path))
   end
+end
+
+# SketchUp 2021 save_as changes association; temporary instances and their
+# unique definitions are removed by abort_operation, not their saved files.
+class LegacyExportDefinition < FakeDefinition
+  undef_method :save_copy
+  attr_reader :model, :path
+  def initialize(name, entities, model, path = nil)
+    super(name, entities)
+    @model, @path = model, path
+  end
+  def save_as(path)
+    @path = path
+    File.binwrite(path, "saved:#{name}")
+    true
+  end
+end
+
+class LegacyExportModel
+  class Entities < Array
+    def add_instance(definition, _transformation)
+      instance = Sketchup::ComponentInstance.new(definition)
+      instance.define_singleton_method(:make_unique) do
+        return self if definition.model.decline_unique || definition.model.entities.count { |item| item.definition == definition } == 1
+        self.definition = LegacyExportDefinition.new(definition.name, definition.entities, definition.model, definition.path)
+        self
+      end
+      self << instance
+      instance
+    end
+  end
+  attr_reader :entities
+  attr_accessor :decline_unique
+  def initialize
+    @entities = Entities.new
+  end
+  def start_operation(_name, _disable_ui)
+    @before = @entities.dup
+    true
+  end
+  def abort_operation
+    @entities.replace(@before)
+    true
+  end
+end
+
+module Geom
+  class Transformation; end unless const_defined?(:Transformation)
 end
 
 class CatalogVersionTest

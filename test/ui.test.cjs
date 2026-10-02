@@ -134,7 +134,7 @@ assert.equal((await calls(p,'retry_catalog_sync')).length,1);
 await p.locator('[data-card-key="personal:same"] [data-update-version]').click();
 assert.match(await p.locator('#modal-description').textContent(),/новую версию/);
 await p.locator('#confirm').click();
-assert.deepEqual((await calls(p,'update_catalog_version')).at(-1),['update_catalog_version','same','1']);
+assert.deepEqual((await calls(p,'update_catalog_version')).at(-1),['update_catalog_version','same','1','personal']);
 await p.locator('[data-card-key="personal:same"] [data-place]').click();
 assert.deepEqual((await calls(p,'place_model')).at(-1),['place_model','same']);
 });

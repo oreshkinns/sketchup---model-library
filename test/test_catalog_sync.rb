@@ -3,6 +3,34 @@ require_relative '../maf_library/model_recognition'
 require_relative '../maf_library/catalog_sync' if File.file?(File.expand_path('../maf_library/catalog_sync.rb', __dir__))
 
 class CatalogSyncTest < Minitest::Test
+  def set_unequal_native_bounds
+    length = Struct.new(:value) do
+      def to_f; value; end
+      def to_mm; value * 25.4; end
+    end
+    bounds = Struct.new(:width, :height, :depth, :min, :max).new(
+      length.new(1500 / 25.4), length.new(500 / 25.4), length.new(700 / 25.4),
+      FakePoint.new(0, 0, 0), FakePoint.new(1500 / 25.4, 500 / 25.4, 700 / 25.4))
+    @definition.define_singleton_method(:bounds) { bounds }
+  end
+
+  def test_auto_save_preserves_width_depth_height_with_vertical_z
+    set_unequal_native_bounds
+    current = report
+    assert_equal [1500.0, 500.0, 700.0], current['models'].first['metadata']['bbox_mm']
+    assert_equal 1, syncer.sync(current)[:created]
+    entry = @catalogs.entries.first
+    assert_equal [1500.0, 500.0, 700.0], entry['bbox_mm']
+  end
+
+  def test_version_update_preserves_width_depth_height_with_vertical_z
+    set_unequal_native_bounds
+    assert_equal 1, syncer.sync(report)[:created]
+    entry = @catalogs.entries.first
+    updated = @catalogs.catalog('personal').update_definition_version(entry['id'], @definition)
+    assert_equal [1500.0, 500.0, 700.0], updated['bbox_mm']
+  end
+
   def setup
     @dir = Dir.mktmpdir
     settings = MafLibrary::Settings.new(File.join(@dir, 'settings.json'), personal: File.join(@dir, 'personal'), shared: File.join(@dir, 'shared'))

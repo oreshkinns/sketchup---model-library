@@ -204,8 +204,8 @@ module MafLibrary
         safely { add_selected_to_library(scope.to_s, name, category, copy_existing: true) }
       end
       @dialog.add_action_callback('retry_catalog_sync') { |_context| safely { refresh } }
-      @dialog.add_action_callback('update_catalog_version') do |_context, id, definition_id|
-        safely { update_catalog_version(id.to_s, definition_id) }
+      @dialog.add_action_callback('update_catalog_version') do |_context, id, definition_id, scope|
+        safely { update_catalog_version(id.to_s, definition_id, scope) }
       end
       @dialog.add_action_callback('export_report') { |_context| safely { export_report } }
       @dialog.add_action_callback('select_rows') { |_context, ids| safely { select_rows(ids) } }
@@ -862,8 +862,10 @@ module MafLibrary
       refresh
     end
 
-    def update_catalog_version(id, requested_definition = nil)
-      entries = recognition_catalogs.entries.select { |entry| entry['id'] == id }
+    def update_catalog_version(id, requested_definition = nil, scope = nil)
+      entries = recognition_catalogs.entries.select do |entry|
+        entry['id'] == id && (scope.nil? || entry['scope'] == scope.to_s)
+      end
       raise ArgumentError, 'Выберите однозначную карточку личной или общей библиотеки' unless entries.length == 1 &&
         Settings::SCOPES.include?(entries.first['scope'])
       entry = entries.first

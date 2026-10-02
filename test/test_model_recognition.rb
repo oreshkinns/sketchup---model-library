@@ -2,6 +2,31 @@ require_relative 'test_core'
 require_relative '../maf_library/model_recognition' if File.file?(File.expand_path('../maf_library/model_recognition.rb', __dir__))
 
 class ModelRecognitionTest < Minitest::Test
+  def test_shared_definition_geometry_is_cached_across_parent_rows_and_fresh_each_pass
+    leaf = confirmed('Shared', [FakeEdge.new])
+    reads = 0
+    leaf.define_singleton_method(:attribute_dictionaries) { reads += 1; nil }
+    parents = 4.times.map { |n| confirmed("Assembly #{n}", [component(leaf)]) }
+    model = FakeModel.new(parents.map { |parent| component(parent) })
+    raw = MafLibrary::Analyzer.new(model).scan
+    assert_equal 1, reads, 'Duplicate geometry evidence must be read once per definition'
+    reads = 0
+    leaf.define_singleton_method(:attribute_dictionaries) { nil }
+    leaf.define_singleton_method(:insertion_point) { reads += 1; FakePoint.new(0, 0, 0) }
+    edges = leaf.entities
+    geometry_reads = 0
+    edges.define_singleton_method(:each) { |&block| geometry_reads += 1; super(&block) }
+    report = MafLibrary::ModelRecognition.new(raw, catalog_entries: []).apply
+    assert_equal 1, reads, 'Catalog geometry evidence must be read once per definition'
+    assert_equal 1, geometry_reads, 'Geometry parameters must be read once per definition'
+    assert_equal 4, report['models'].find { |row| row['name'] == 'Shared' }['instances']
+    assert_equal 8, report['summary']['maf_instances']
+    prior = report['models'].find { |row| row['name'] == 'Shared' }['recognition_fingerprint']
+    leaf.entities.first.end.position.x = 7
+    fresh = MafLibrary::ModelRecognition.new(MafLibrary::Analyzer.new(model).scan, catalog_entries: []).apply
+    refute_equal prior, fresh['models'].find { |row| row['name'] == 'Shared' }['recognition_fingerprint']
+  end
+
   def scan(entities, entries = [])
     report = MafLibrary::Analyzer.new(FakeModel.new(entities)).scan
     assert defined?(MafLibrary::ModelRecognition), 'ModelRecognition must classify analyzer rows'
