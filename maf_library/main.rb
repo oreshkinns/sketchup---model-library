@@ -49,8 +49,11 @@ module MafLibrary
       @controller.report_stale(model)
     end
 
-    alias_method :onTransactionUndo, :onTransactionCommit
-    alias_method :onTransactionRedo, :onTransactionCommit
+    def onTransactionUndo(model)
+      @controller.report_stale(model, read_only: true)
+    end
+
+    alias_method :onTransactionRedo, :onTransactionUndo
   end
 
   class ReportAppObserver < (defined?(Sketchup::AppObserver) ? Sketchup::AppObserver : Object)
@@ -98,6 +101,7 @@ module MafLibrary
       @expected_selection_ids = nil
       @available_update = nil
       @report_stale = false
+      @read_only_reconciliation = false
       @report_model = nil
       @report_observer = ReportModelObserver.new(self)
       @app_observer = ReportAppObserver.new(self)
@@ -146,8 +150,12 @@ module MafLibrary
       @refresh_timer_id = timer_id
     end
 
-    def report_stale(changed_model = model)
+    def report_stale(changed_model = model, read_only: false)
       return if changed_model != model || @service_writing || @panel_closed
+      # Native transaction-start callbacks are deferred until commit, so they
+      # cannot safely prove that a delayed timer can append a transparent write.
+      # Keep ordinary persistent writes, but never regenerate them after Undo.
+      @read_only_reconciliation = read_only
       queue_refresh
       mark_report_stale
     rescue StandardError => error
@@ -159,6 +167,7 @@ module MafLibrary
       cancel_timers
       detach_model_observers
       @last_report = nil
+      @read_only_reconciliation = false
       @last_model = current_model
       @selected_row_ids = []
       @expected_selection_ids = nil
@@ -282,8 +291,8 @@ module MafLibrary
       cancel_timers
       detach_model_observers
       @panel_closed = false
+      # Preserve pending Redo when reopening this panel in the same live model.
       @last_report = nil
-      @last_model = nil
       @selected_row_ids = []
       @expected_selection_ids = nil
       @app_observer ||= ReportAppObserver.new(self)
@@ -304,7 +313,10 @@ module MafLibrary
       @refreshing = true
       @pending_change = false
       begin
-        @selected_row_ids = [] if @last_model != model
+        if @last_model != model
+          @selected_row_ids = []
+          @read_only_reconciliation = false
+        end
         @last_model = model
         attach_report_observer
         attach_selection_observer
@@ -315,7 +327,7 @@ module MafLibrary
         current_report = recognized_report(current_model, catalogs.entries)
         return unless current_model == model && generation == @timer_generation && !@panel_closed
         before = link_snapshot(current_report)
-        result = with_service_writes { CatalogSync.new(model: current_model, catalogs: catalogs).sync(current_report) }
+        result = with_service_writes { CatalogSync.new(model: current_model, catalogs: catalogs).sync(current_report, write_links: !@read_only_reconciliation) }
         if before != link_snapshot(current_report)
           current_report = recognized_report(current_model, catalogs.entries)
         end
@@ -557,7 +569,7 @@ module MafLibrary
       @syncing_selection = false
     end
 
-    def actions_for(ids)
+    def actions_for(ids, catalogs: @catalogs)
       raise 'Модель изменилась. Запустите анализ повторно' unless @last_model == model && @last_report
       current = Analyzer.new(model).scan
       Array(ids).each do |id|
@@ -567,12 +579,12 @@ module MafLibrary
           raise 'Состав выбранных моделей изменился. Запустите анализ повторно'
         end
       end
-      ProjectActions.new(model, current, @catalogs)
+      ProjectActions.new(model, current, catalogs)
     end
 
     def add_rows_to_library(ids, scope)
       raise 'Облачная библиотека доступна только для чтения' unless Settings::SCOPES.include?(scope)
-      count = actions_for(ids).add_to_library(ids, scope)
+      count = actions_for(ids, catalogs: recognition_catalogs).add_to_library(ids, scope)
       refresh("В #{scope == 'shared' ? 'общую' : 'личную'} библиотеку добавлено моделей: #{count}.")
     end
 
@@ -846,6 +858,7 @@ module MafLibrary
           raise
         end
       end
+      @read_only_reconciliation = false
       refresh
     end
 

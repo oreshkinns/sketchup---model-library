@@ -17,7 +17,7 @@ hierarchy:[node('yard','container',{row_id:null,name:'Двор',kind:'group',is_
 catalog:[{id:'same',scope:'personal',name:'Скамья',category:'Скамейки',project_placements:5,version:2,sha256:'a'.repeat(64),bbox_mm:[1800,500,900],faces_count:12,edges_count:24,materials_count:2,file_size_bytes:2048,recognition_source:'manual'},{id:'same',scope:'shared',name:'Общая скамья',project_placements:0}],sections:['Скамейки'],settings:{},cleanup:{},catalog_sync_errors:[{row_id:'definition:3',code:'catalog_sync_failed',message:'Нет доступа к папке'}]
 };
 }
-async function open(t, data=fixture(), demo=false){const page=await browser.newPage({viewport:{width:1440,height:1100}});
+async function open(t, data=fixture(), demo=false, legacy=false){const page=await browser.newPage({viewport:{width:1440,height:1100}});
 page.setDefaultTimeout(1800);
 t.after(()=>page.close());
 const errors=[];
@@ -26,6 +26,7 @@ t.after(()=>assert.deepEqual(errors,[]));
 if(!demo)await page.addInitScript(()=>{window.calls=[];
 window.sketchup=new Proxy({},{get:(_,name)=>(...args)=>window.calls.push([name,...args])});
 });
+if(legacy)await page.addInitScript(()=>{delete Array.prototype.flatMap});
 await page.goto(pathToFileURL(process.env.MAF_UI_FILE||path.join(__dirname,'../preview.html')).href);
 if(!demo)await page.evaluate(data=>MAF.receive({data}),data);
 return page;
@@ -293,4 +294,39 @@ test('review: demo delete removes tree rows and updates component, MAF and card 
   assert.match(await p.locator('#maf-count').textContent(), /29 размещений.*4 определений/);
   await p.locator('.nav [data-page="catalog"]').click();
   assert.equal(await p.locator('[data-card-key="personal:d"] [data-placement-count]').textContent(), 'В текущем проекте: 0 размещений');
+});
+
+test('CEF64: inline UI script parses with ECMAScript 2018 grammar', () => {
+  const fs = require('node:fs');
+  const acorn = require('acorn');
+  const html = fs.readFileSync(process.env.MAF_UI_FILE || path.join(__dirname, '../preview.html'), 'utf8');
+  const scripts = Array.from(html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi), match => match[1]);
+  assert.ok(scripts.length > 0);
+  scripts.forEach(script => assert.doesNotThrow(() => acorn.parse(script, {ecmaVersion:2018})));
+});
+
+test('CEF64: startup and model actions work without Array flatMap', async t => {
+  const p = await open(t, fixture(), false, true);
+  assert.equal(await p.locator('#catalog').isVisible(), true);
+  assert.equal((await calls(p, 'ready')).length, 1);
+  assert.equal(await p.locator('[data-card-key="personal:same"] [data-placement-count]').textContent(), 'В текущем проекте: 5 размещений');
+  await p.locator('[data-update-version="same"]').first().click();
+  assert.equal(await p.locator('#modal-select option').count(), 2);
+  await p.locator('#cancel').click();
+  await p.locator('.nav [data-page="overview"]').click();
+  await p.locator('[data-node="yard/1"]').click();
+  await p.locator('#selected-menu').click();
+  await p.locator('[data-action="delete"]').click();
+  assert.match(await p.locator('#action-scope').textContent(), /Двор \/ 1/);
+});
+
+test('CEF64: demo startup and reconciliation work without Array flatMap', async t => {
+  const p = await open(t, null, true, true);
+  assert.equal(await p.locator('#catalog').isVisible(), true);
+  await p.locator('.nav [data-page="overview"]').click();
+  await p.locator('[data-node="yard/3"]').click();
+  await p.locator('#selected-menu').click();
+  await p.locator('[data-action="delete"]').click();
+  await p.locator('#confirm').click();
+  assert.equal(await p.locator('[data-node="yard/3"]').count(), 0);
 });

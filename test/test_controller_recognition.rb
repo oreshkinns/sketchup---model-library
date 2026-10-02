@@ -427,7 +427,9 @@ class ControllerRecognitionTest < Minitest::Test
     end
     @model.emit(:onTransactionUndo)
     run_timer
-    assert_equal entry['id'], @definition.get_attribute('MafLibrary', 'catalog_id')
+    assert_nil @definition.get_attribute('MafLibrary', 'catalog_id'), 'Undo refresh must preserve Redo'
+    assert_equal entry['id'], report['models'].first['catalog_id']
+    assert_equal 1, cards.first['project_placements']
     assert_equal 1, @catalogs.entries.length
   end
 
@@ -586,5 +588,149 @@ class ControllerRecognitionTest < Minitest::Test
     UI.input_answer = ['Context bench', 'Seats', 'personal']
     items.first.last.call
     assert_equal 'Context bench', @catalogs.entries.first['name']
+  end
+end
+
+class ControllerRecognitionTest
+  def test_report_row_add_preserves_cloud_identity_until_explicit_copy
+    digest = MafLibrary::DefinitionSignature.new(mode: :catalog).call(@definition)[:digest]
+    entry = {'id' => 'remote', 'scope' => 'cloud', 'maf_confirmed' => true,
+      'recognition_fingerprint' => digest, 'version' => 3, 'sha256' => 'remote-sha'}
+    source = Struct.new(:entries).new([entry])
+    @controller.define_singleton_method(:cloud) { source }
+    ready
+    id = report['models'].first['id']
+    assert_raises(MafLibrary::CatalogSync::Blocked) do
+      @controller.send(:add_rows_to_library, [id], 'personal')
+    end
+    assert_empty @catalogs.entries
+    assert_equal 'remote', @definition.get_attribute('MafLibrary', 'catalog_id')
+    assert_equal 'cloud', @definition.get_attribute('MafLibrary', 'catalog_scope')
+    select
+    copied = @controller.send(:add_selected_to_library, 'personal', 'Local copy', 'Seats', copy_existing: true)
+    assert_equal 1, @catalogs.entries.length
+    assert_equal copied['id'], @definition.get_attribute('MafLibrary', 'catalog_id')
+    assert_equal 'personal', @definition.get_attribute('MafLibrary', 'catalog_scope')
+    assert_equal 1, source.entries.length
+  end
+end
+
+# Model operations retain before/after snapshots and clear Redo on a new commit.
+# This models the Undo contract, rather than only emitting observer callbacks.
+class TransactionHistoryModel < RecognitionControllerModel
+  attr_reader :undo_entries, :redo_entries
+  def initialize(entities, definition)
+    super(entities)
+    @tracked_definition = definition
+    @undo_entries, @redo_entries = [], []
+  end
+  def snapshot
+    [entities.dup, @tracked_definition.instance_variable_get(:@attrs).dup]
+  end
+  def restore(snapshot)
+    entities.replace(snapshot[0])
+    @tracked_definition.instance_variable_set(:@attrs, snapshot[1].dup)
+  end
+  def start_operation(name, *_flags)
+    @operation = [name, snapshot]
+    super
+  end
+  def commit_operation
+    @undo_entries << [@operation[0], @operation[1], snapshot]
+    @redo_entries.clear
+    @operation = nil
+    super
+  end
+  def abort_operation
+    restore(@operation[1]) if @operation
+    @operation = nil
+  end
+  def undo
+    entry = @undo_entries.pop
+    raise 'No operation to undo' unless entry
+    restore(entry[1])
+    @redo_entries << entry
+    emit(:onTransactionUndo)
+  end
+  def redo
+    entry = @redo_entries.pop
+    raise 'No operation to redo' unless entry
+    restore(entry[2])
+    @undo_entries << entry
+    emit(:onTransactionRedo)
+  end
+end
+
+class ControllerRecognitionTest
+  def history_model
+    Sketchup.active_model = @model = TransactionHistoryModel.new([@instance], @definition)
+  end
+
+  def test_initial_incomplete_link_has_one_undo_step_and_refresh_preserves_redo
+    @definition.entities = [Object.new]
+    @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
+    history_model
+    ready
+    original = @catalogs.entries.first
+    assert_equal 1, @model.undo_entries.length, 'initial persistence is an explicit extra Undo step'
+    @model.undo
+    assert_nil @definition.get_attribute('MafLibrary', 'catalog_id')
+    operations = @model.operations.length
+    run_timer
+    assert_equal operations, @model.operations.length, 'Undo reconciliation must not commit a new link operation'
+    assert_equal 1, @model.redo_entries.length
+    assert_equal 1, @catalogs.entries.length
+    assert_equal 1, cards.first['project_placements']
+    assert_equal original['id'], report['models'].first['catalog_id']
+    @controller.send(:refresh)
+    assert_equal operations, @model.operations.length, 'manual analysis also preserves pending Redo'
+    @controller.send(:panel_closed)
+    ready
+    assert_equal operations, @model.operations.length, 'reopening the panel also preserves pending Redo'
+    assert_equal 1, @model.redo_entries.length
+    @model.redo
+    run_timer
+    assert_equal original['id'], @definition.get_attribute('MafLibrary', 'catalog_id')
+    assert_equal 1, @catalogs.entries.length
+    assert_equal 1, cards.first['project_placements']
+  end
+
+  def test_undo_then_redo_placement_preserves_counts_and_catalog_identity
+    @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
+    history_model
+    ready
+    original = @catalogs.entries.first
+    @model.start_operation('Remove placement', true)
+    @model.entities.clear
+    @model.commit_operation
+    run_timer
+    assert_equal 0, cards.first['project_placements']
+    @model.undo
+    run_timer
+    assert_equal 1, cards.first['project_placements']
+    assert_equal 1, @model.redo_entries.length
+    @model.redo
+    run_timer
+    assert_equal 0, cards.first['project_placements']
+    assert_equal original['id'], @catalogs.entries.first['id']
+    assert_equal 1, @catalogs.entries.length
+  end
+
+  def test_new_user_commit_after_undo_allows_persistent_recovery_without_duplicate
+    @definition.entities = [Object.new]
+    @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
+    history_model
+    ready
+    original = @catalogs.entries.first
+    @model.undo
+    run_timer
+    assert_nil @definition.get_attribute('MafLibrary', 'catalog_id')
+    @model.start_operation('Rename after Undo', true)
+    @definition.set_attribute('OtherExtension', 'edit', 1)
+    @model.commit_operation
+    run_timer
+    assert_equal original['id'], @definition.get_attribute('MafLibrary', 'catalog_id')
+    assert_equal 1, @catalogs.entries.length
+    assert_empty @model.redo_entries
   end
 end

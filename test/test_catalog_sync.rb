@@ -321,3 +321,21 @@ class CatalogSyncTest
     assert_includes recovered['recognition_warnings'], 'catalog_geometry_unverified'
   end
 end
+
+class CatalogSyncTest
+  def test_explicit_same_scope_copy_creates_distinct_card_and_preserves_original
+    original = syncer.add_selected(definition: @definition, scope: 'personal', name: 'Original', category: 'Seats')
+    catalog = @catalogs.catalog('personal')
+    original_bytes = File.binread(catalog.file_for(original['id']))
+    copy = syncer.add_selected(definition: @definition, scope: 'personal', name: 'Separate copy', category: 'Other', copy_existing: true)
+    refute_equal original['id'], copy['id']
+    assert_equal 2, catalog.entries.length
+    assert_equal 'Separate copy', copy['name']
+    assert_equal 'Other', copy['category']
+    assert_equal copy['id'], @definition.get_attribute('MafLibrary', 'catalog_id')
+    assert_equal original, catalog.find(original['id'])
+    assert_equal original_bytes, File.binread(catalog.file_for(original['id']))
+    assert File.file?(catalog.file_for(copy['id']))
+    assert_equal 2, Dir.glob(File.join(catalog.root, 'models', '*.skp')).length
+  end
+end

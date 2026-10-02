@@ -41,4 +41,3 @@ module MafLibrary
     private_class_method :candidate
   end
 end
-

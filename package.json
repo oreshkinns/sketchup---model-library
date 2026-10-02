@@ -2,5 +2,5 @@
   "name": "maf-library-ui",
   "private": true,
   "scripts": { "test": "node --test test/ui.test.cjs" },
-  "devDependencies": { "playwright": "1.62.1" }
+  "devDependencies": { "acorn": "8.15.0", "playwright": "1.62.1" }
 }

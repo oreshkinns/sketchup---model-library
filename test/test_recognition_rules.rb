@@ -119,4 +119,3 @@ class RecognitionRulesTest < Minitest::Test
     assert_candidate(names: [], category: 'Скамейки')
   end
 end
-

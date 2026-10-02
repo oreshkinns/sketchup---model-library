@@ -28,7 +28,7 @@ module MafLibrary
       end
     end
 
-    def sync(report)
+    def sync(report, write_links: true)
       result = {created: 0, linked: 0, errors: []}
       Array(report['models']).each do |row|
         next unless row['is_maf'] == true
@@ -47,10 +47,10 @@ module MafLibrary
               end
               entry = create_entry(definition, 'personal', row['name'], row['category'], row['recognition_source'], fingerprint)
             end
-            bind(definition, entry)
+            bind(definition, entry, write: write_links)
             row['catalog_id'] = entry['id']
             row['catalog_scope'] = entry['scope']
-            row['catalog_version'] = definition.get_attribute(DICTIONARY, 'catalog_version')
+            row['catalog_version'] = definition.get_attribute(DICTIONARY, 'catalog_version') || entry['version']
             row['recognized_catalog'] = true
             row['recognized_catalog_scope'] = entry['scope']
             warnings = (row['recognition_warnings'] ||= [])
@@ -88,7 +88,7 @@ module MafLibrary
       if existing && existing['scope'] != scope && !copy_existing
         raise Blocked, 'Модель уже связана с другой библиотекой. Используйте отдельное действие «Создать копию»'
       end
-      if existing && existing['scope'] == scope
+      if existing && existing['scope'] == scope && !copy_existing
         bind(definition, existing, manual: true)
         return without_scope(existing, recovery_definition: recovering ? definition : nil)
       end
@@ -145,9 +145,12 @@ module MafLibrary
         maf_confirmed: true, recognition_source: source, recognition_fingerprint: fingerprint).merge('scope' => scope)
     end
 
-    def bind(definition, entry, manual: false)
+    def bind(definition, entry, manual: false, write: true)
       # Record immediately after save, before an operation can fail or be undone.
       @recovery[definition] = {scope: entry['scope'], id: entry['id']}
+      # Undo/Redo scans recover report identity without adding an operation that
+      # would clear Redo. A later user commit can persist the link again.
+      return unless write
       same = definition.get_attribute(DICTIONARY, 'catalog_id') == entry['id'] &&
              definition.get_attribute(DICTIONARY, 'catalog_scope') == entry['scope']
       attributes = {'catalog_id' => entry['id'], 'catalog_scope' => entry['scope']}
