@@ -148,8 +148,8 @@ module MafLibrary
 
     def report_stale(changed_model = model)
       return if changed_model != model || @service_writing || @panel_closed
-      mark_report_stale
       queue_refresh
+      mark_report_stale
     rescue StandardError => error
       warn("МАФ Каталог: observer: #{error.message}")
     end
@@ -352,8 +352,9 @@ module MafLibrary
 
     def mark_report_stale
       @report_stale = true
+      # The panel clears displayed counts from this marker; observers must not
+      # read catalog files or serialize all thumbnails just to invalidate them.
       push(report_stale: true)
-      refresh_catalog(nil)
     end
 
     def cancel_timers
@@ -686,16 +687,40 @@ module MafLibrary
     def load_catalog_definition(entry)
       path = entry['scope'] == 'cloud' ? cloud.ensure_local(entry['id']) : @catalogs.catalog(entry['scope']).file_for(entry['id'])
       raise 'Файл модели каталога отсутствует' unless path && File.file?(path)
-      definition = model.definitions.load(path)
+      unless !entry['sha256'].to_s.empty? && Digest::SHA256.file(path).hexdigest == entry['sha256']
+        raise ArgumentError, 'Файл модели отличается от карточки каталога. Обновите библиотеку'
+      end
+      definitions = model.definitions
+      existing = definitions.to_a
+      definition = definitions.load(path)
       raise 'Файл каталога не содержит геометрии' if definition.entities.empty?
-      stamp_catalog_metadata(definition, entry)
+      if existing.include?(definition)
+        # SketchUp may reuse a live definition for a previously loaded path.
+        # File verification says nothing about edits to that live definition.
+        validate_reused_catalog_definition(definition, entry)
+      else
+        stamp_catalog_metadata(definition, entry, verified_load: true)
+      end
       definition
     end
 
-    def stamp_catalog_metadata(definition, entry)
+    def validate_reused_catalog_definition(definition, entry)
+      identity = {'catalog_id' => entry['id'], 'catalog_scope' => entry['scope'],
+                  'catalog_version' => entry['version'], 'source_sha' => entry['sha256']}
+      matches = identity.all? { |key, value| definition.get_attribute(Analyzer::DICTIONARY, key) == value }
+      if entry['recognition_fingerprint']
+        signature = DefinitionSignature.new(mode: :catalog).call(definition)
+        matches &&= signature[:complete] && !signature[:sampled] && signature[:digest] == entry['recognition_fingerprint']
+      end
+      unless matches
+        raise ArgumentError, 'SketchUp вернул существующее изменённое определение. Загрузите карточку в новом проекте'
+      end
+    end
+
+    def stamp_catalog_metadata(definition, entry, verified_load: false)
       catalog_id = definition.get_attribute(Analyzer::DICTIONARY, 'catalog_id')
       source_sha = definition.get_attribute(Analyzer::DICTIONARY, 'source_sha')
-      if catalog_id.nil? || catalog_id.to_s.empty?
+      if verified_load || catalog_id.nil? || catalog_id.to_s.empty?
         definition.set_attribute(Analyzer::DICTIONARY, 'catalog_id', entry['id'])
         definition.set_attribute(Analyzer::DICTIONARY, 'catalog_scope', entry['scope'])
         definition.set_attribute(Analyzer::DICTIONARY, 'recognition_fingerprint', entry['recognition_fingerprint'])
@@ -865,22 +890,14 @@ module MafLibrary
     def place_model(id)
       entry = @catalogs.find(id) || cloud&.find(id)
       raise ArgumentError, 'Модель не найдена в библиотеке' unless entry
-      path = if entry['scope'] == 'cloud'
-               cloud.ensure_local(id)
-             else
-               @catalogs.catalog(entry['scope']).file_for(id)
-             end
-      raise 'Файл модели отсутствует' unless path && File.file?(path)
       current = model
       current.start_operation('Загрузить МАФ из каталога', true)
       begin
-        definition = current.definitions.load(path)
-        raise 'Модель не содержит геометрии' if definition.entities.length == 0
+        definition = load_catalog_definition(entry)
         if entry['scope'] != 'cloud'
           catalog = @catalogs.catalog(entry['scope'])
           catalog.generate_thumbnail(id, definition) unless catalog.thumbnail_path(id)
         end
-        stamp_catalog_metadata(definition, entry)
         current.commit_operation
       rescue StandardError
         current.abort_operation
@@ -916,15 +933,11 @@ module MafLibrary
       raise 'Завершите редактирование компонента перед раскладкой' if model.active_path
       entry = @catalogs.find(id) || cloud&.find(id)
       raise 'Модель не найдена в библиотеке' unless entry
-      path = entry['scope'] == 'cloud' ? cloud.ensure_local(id) : @catalogs.catalog(entry['scope']).file_for(id)
-      raise 'Файл модели отсутствует' unless path && File.file?(path)
-      definition = model.definitions.load(path)
-      raise 'Модель не содержит геометрии' if definition.entities.empty?
+      definition = load_catalog_definition(entry)
       if entry['scope'] != 'cloud'
         catalog = @catalogs.catalog(entry['scope'])
         catalog.generate_thumbnail(id, definition) unless catalog.thumbnail_path(id)
       end
-      stamp_catalog_metadata(definition, entry)
       tool = ArrayTool.new(model, definition, mode, spacing_mm, surface_options) do |count|
         entry['scope'] == 'cloud' ? @settings.mark_cloud_used(id) : @catalogs.catalog(entry['scope']).mark_used(id)
         refresh("Размещено моделей: #{count}. Операция поддерживает Undo.")

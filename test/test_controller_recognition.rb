@@ -61,6 +61,36 @@ class RecognitionControllerModel < FakeModel
   end
 end
 
+# Exercise the metadata that SketchUp actually serializes inside a saved SKP.
+class SerializedControllerDefinition < FakeDefinition
+  def save_copy(path)
+    coordinates = entities.map { |edge| [edge.start.position.to_a, edge.end.position.to_a] }
+    File.binwrite(path, Marshal.dump([name, coordinates, @attrs]))
+    true
+  end
+
+  def self.load(path)
+    name, coordinates, attributes = Marshal.load(File.binread(path))
+    entities = coordinates.map do |start_point, end_point|
+      edge = FakeEdge.new
+      edge.start.position = FakePoint.new(*start_point)
+      edge.end.position = FakePoint.new(*end_point)
+      edge
+    end
+    new(name, entities, attributes)
+  end
+end
+
+class SerializedControllerDefinitions < Array
+  attr_accessor :reused_definition
+  def load(path)
+    return reused_definition if reused_definition
+    definition = SerializedControllerDefinition.load(path)
+    self << definition
+    definition
+  end
+end
+
 class ControllerRecognitionTest < Minitest::Test
   def setup
     @dir = Dir.mktmpdir
@@ -100,9 +130,14 @@ class ControllerRecognitionTest < Minitest::Test
   end
 
   def cards
+    stale = nil
     @dialog.payloads.reverse_each do |payload|
+      stale = payload['report_stale'] if stale.nil? && payload.key?('report_stale')
       data = payload['data'] || payload['catalog_update']
-      return data['catalog'] if data && data['catalog']
+      next unless data && data['catalog']
+      # Match the panel's report_stale contract without asking an observer to
+      # rebuild or resend a complete catalog (including thumbnail data).
+      return stale ? data['catalog'].map { |card| card.merge('project_placements' => nil) } : data['catalog']
     end
     []
   end
@@ -122,6 +157,149 @@ class ControllerRecognitionTest < Minitest::Test
     run_timer
     refute_same original, report
     assert_empty UI.timers
+  end
+
+  def test_transaction_burst_performs_no_catalog_io_before_timer
+    select
+    @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    ready
+    manifest_reads, thumbnail_reads = 0, 0
+    entries = @catalogs.entries
+    original_card = @controller.method(:catalog_card)
+    @catalogs.stub(:entries, -> { manifest_reads += 1; entries }) do
+      @controller.stub(:catalog_card, ->(entry) { thumbnail_reads += 1; original_card.call(entry) }) do
+        3.times { @model.emit(:onTransactionCommit) }
+        assert_equal 0, manifest_reads
+        assert_equal 0, thumbnail_reads
+        assert_equal({'report_stale' => true}, @dialog.payloads.last)
+        assert_nil cards.first['project_placements']
+        assert_equal [0.5], UI.timers.values.map(&:first)
+        run_timer
+        assert_operator manifest_reads, :>, 0
+        assert_operator thumbnail_reads, :>, 0
+      end
+    end
+  end
+
+  def test_catalog_read_failure_is_deferred_until_queued_refresh
+    ready
+    reads = 0
+    @catalogs.stub(:entries, -> { reads += 1; raise IOError, 'catalog unavailable' }) do
+      capture_io { 3.times { @model.emit(:onTransactionCommit) } }
+      assert_equal 1, UI.timers.length
+      assert_equal 0, reads
+      capture_io { run_timer }
+      assert_equal 1, reads
+      assert @dialog.payloads.last['error']
+      assert @controller.instance_variable_get(:@report_stale)
+      refute @controller.instance_variable_get(:@refreshing)
+    end
+  end
+
+  def test_stale_publication_failure_cannot_prevent_refresh_timer
+    ready
+    @dialog.stub(:execute_script, ->(*) { raise IOError, 'panel unavailable' }) do
+      capture_io { 3.times { @model.emit(:onTransactionCommit) } }
+    end
+    assert_equal [0.5], UI.timers.values.map(&:first)
+    assert @controller.instance_variable_get(:@report_stale)
+    run_timer
+    refute @controller.instance_variable_get(:@report_stale)
+  end
+
+  def serialized_selection
+    @definition = SerializedControllerDefinition.new('Bench', [FakeEdge.new])
+    @instance.definition = @definition
+    select
+  end
+
+  def fresh_model_for_catalog_load
+    definitions = SerializedControllerDefinitions.new
+    Sketchup.active_model = @model = RecognitionControllerModel.new([])
+    @model.define_singleton_method(:definitions) { definitions }
+  end
+
+  def load_in_fresh_model(entry)
+    fresh_model_for_catalog_load
+    @controller.send(:load_catalog_definition, entry)
+  end
+
+  def assert_loaded_metadata(entry, definition)
+    {'catalog_id' => 'id', 'catalog_scope' => 'scope', 'catalog_version' => 'version',
+     'source_sha' => 'sha256', 'recognition_fingerprint' => 'recognition_fingerprint'}.each do |attribute, key|
+      assert_equal entry[key], definition.get_attribute('MafLibrary', attribute), attribute
+    end
+  end
+
+  def test_copy_round_trip_load_normalizes_serialized_source_identity
+    serialized_selection
+    personal = @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    shared = @controller.send(:add_selected_to_library, 'shared', 'Shared bench', 'Seats', copy_existing: true)
+    entry = @catalogs.find(shared['id'])
+    raw = SerializedControllerDefinition.load(@catalogs.catalog('shared').file_for(entry['id']))
+    assert_equal personal['id'], raw.get_attribute('MafLibrary', 'catalog_id')
+    loaded = load_in_fresh_model(entry)
+    assert_loaded_metadata(entry, loaded)
+  end
+
+  def test_version_round_trip_load_normalizes_serialized_prior_version
+    serialized_selection
+    saved = @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    @definition.entities.first.end.position.x = 5
+    @controller.send(:update_catalog_version, saved['id'], @definition)
+    entry = @catalogs.find(saved['id'])
+    raw = SerializedControllerDefinition.load(@catalogs.catalog('personal').file_for(entry['id']))
+    assert_equal 1, raw.get_attribute('MafLibrary', 'catalog_version')
+    loaded = load_in_fresh_model(entry)
+    assert_loaded_metadata(entry, loaded)
+  end
+
+  def test_catalog_load_does_not_relabel_modified_existing_definition
+    serialized_selection
+    saved = @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    entry = @catalogs.find(saved['id'])
+    @definition.entities.first.end.position.x = 99
+    @definition.set_attribute('MafLibrary', 'catalog_id', nil)
+    before = @definition.instance_variable_get(:@attrs).dup
+    definitions = SerializedControllerDefinitions.new([@definition])
+    definitions.reused_definition = @definition
+    @model.define_singleton_method(:definitions) { definitions }
+    assert_raises(ArgumentError) { @controller.send(:load_catalog_definition, entry) }
+    assert_equal before, @definition.instance_variable_get(:@attrs)
+  end
+
+  def test_catalog_load_rejects_file_whose_checksum_no_longer_matches_card
+    serialized_selection
+    saved = @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    entry = @catalogs.find(saved['id'])
+    @definition.entities.first.end.position.x = 8
+    @definition.save_copy(@catalogs.catalog('personal').file_for(entry['id']))
+    assert_raises(ArgumentError) { load_in_fresh_model(entry) }
+  end
+
+  def test_placement_load_normalizes_copied_card_identity
+    serialized_selection
+    @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    shared = @controller.send(:add_selected_to_library, 'shared', 'Shared', 'Seats', copy_existing: true)
+    entry = @catalogs.find(shared['id'])
+    fresh_model_for_catalog_load
+    placed = nil
+    @model.define_singleton_method(:place_component) { |definition| placed = definition; true }
+    @controller.send(:place_model, entry['id'])
+    assert_loaded_metadata(entry, placed)
+  end
+
+  def test_array_load_normalizes_copied_card_identity
+    serialized_selection
+    @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    shared = @controller.send(:add_selected_to_library, 'shared', 'Shared', 'Seats', copy_existing: true)
+    entry = @catalogs.find(shared['id'])
+    fresh_model_for_catalog_load
+    array_definition = nil
+    @model.define_singleton_method(:select_tool) { |_tool| true }
+    factory = ->(_model, definition, *_args) { array_definition = definition; Object.new }
+    MafLibrary::ArrayTool.stub(:new, factory) { @controller.send(:start_array, entry['id'], 'line', 500) }
+    assert_loaded_metadata(entry, array_definition)
   end
 
   def test_undo_redo_recompute_counts_and_keep_zero_placement_card
