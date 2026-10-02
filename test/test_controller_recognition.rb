@@ -1,0 +1,412 @@
+require_relative 'test_core'
+
+module Sketchup
+  class << self
+    def app_observers
+      @app_observers ||= []
+    end
+    def add_observer(observer)
+      app_observers << observer
+    end
+    def remove_observer(observer)
+      app_observers.delete(observer)
+    end
+  end
+end
+
+module UI
+  class << self
+    attr_accessor :timers, :timer_sequence, :messages, :context_handlers, :input_answer
+    def start_timer(delay, repeat, &block)
+      self.timers ||= {}
+      self.timer_sequence = (timer_sequence || 0) + 1
+      timers[timer_sequence] = [delay, repeat, block]
+      timer_sequence
+    end
+    def stop_timer(id)
+      timers.delete(id)
+    end
+    def messagebox(message, *_args)
+      (self.messages ||= []) << message
+    end
+    def add_context_menu_handler(&block)
+      (self.context_handlers ||= []) << block
+    end
+    def inputbox(*_args)
+      input_answer
+    end
+  end
+end
+
+class RecognitionControllerModel < FakeModel
+  attr_reader :observers, :operations
+  def initialize(entities)
+    super
+    @observers, @operations = [], []
+  end
+  def add_observer(observer)
+    @observers << observer
+  end
+  def remove_observer(observer)
+    @observers.delete(observer)
+  end
+  def start_operation(name, *_args)
+    @operations << name
+  end
+  def commit_operation
+    emit(:onTransactionCommit)
+  end
+  def emit(event)
+    @observers.dup.each { |observer| observer.public_send(event, self) }
+  end
+end
+
+class ControllerRecognitionTest < Minitest::Test
+  def setup
+    @dir = Dir.mktmpdir
+    @settings = MafLibrary::Settings.new(File.join(@dir, 'settings.json'),
+      personal: File.join(@dir, 'personal'), shared: File.join(@dir, 'shared'))
+    @catalogs = MafLibrary::CatalogManager.new(@settings)
+    @controller = MafLibrary::Controller.new
+    @dialog = FakeDialog.new
+    @controller.instance_variable_set(:@settings, @settings)
+    @controller.instance_variable_set(:@catalogs, @catalogs)
+    @controller.instance_variable_set(:@dialog, @dialog)
+    @controller.send(:register_callbacks)
+    UI.timers, UI.messages = {}, []
+    @definition = FakeDefinition.new('Bench', [FakeEdge.new])
+    @instance = Sketchup::ComponentInstance.new(@definition)
+    Sketchup.active_model = @model = RecognitionControllerModel.new([@instance])
+  end
+
+  def teardown
+    @controller.send(:panel_closed) if @controller.respond_to?(:panel_closed, true)
+    FileUtils.remove_entry(@dir)
+  end
+
+  def ready
+    @controller.send(:panel_ready)
+  end
+
+  def run_timer
+    id, timer = UI.timers.first
+    refute_nil timer, 'expected queued timer'
+    UI.timers.delete(id)
+    timer.last.call
+  end
+
+  def report
+    @controller.instance_variable_get(:@last_report)
+  end
+
+  def cards
+    @dialog.payloads.reverse_each do |payload|
+      data = payload['data'] || payload['catalog_update']
+      return data['catalog'] if data && data['catalog']
+    end
+    []
+  end
+
+  def select(entity = @instance)
+    @model.selection.clear
+    @model.selection.add(entity)
+  end
+
+  def test_open_and_transaction_burst_coalesce_without_synchronous_scan
+    ready
+    refute_nil report
+    original = report
+    3.times { @model.emit(:onTransactionCommit) }
+    assert_same original, report
+    assert_equal [0.5], UI.timers.values.map(&:first)
+    run_timer
+    refute_same original, report
+    assert_empty UI.timers
+  end
+
+  def test_undo_redo_recompute_counts_and_keep_zero_placement_card
+    select
+    @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    ready
+    assert_equal 1, cards.first['project_placements']
+    @model.entities.clear
+    @model.emit(:onTransactionUndo)
+    assert_nil cards.first['project_placements']
+    run_timer
+    assert_equal 0, cards.first['project_placements']
+    @model.entities << @instance
+    @model.emit(:onTransactionRedo)
+    run_timer
+    assert_equal 1, cards.first['project_placements']
+  end
+
+  def test_service_writes_rescan_once_and_do_not_queue_loop
+    @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
+    calls = 0
+    original = MafLibrary::Analyzer.method(:new)
+    factory = lambda { |model| calls += 1; original.call(model) }
+    MafLibrary::Analyzer.stub(:new, factory) { ready }
+    assert_equal 2, calls
+    assert_equal 1, @catalogs.entries.length
+    assert_empty UI.timers
+    MafLibrary::Analyzer.stub(:new, factory) { @controller.send(:refresh) }
+    assert_equal 3, calls, 'unchanged linked count must not force rescan'
+    assert_empty UI.timers
+  end
+
+  def test_real_edit_during_refresh_is_deferred_and_guard_blocks_reentrancy
+    ready
+    calls = 0
+    original = MafLibrary::Analyzer.method(:new)
+    factory = lambda do |model|
+      calls += 1
+      if calls == 1
+        @model.emit(:onTransactionCommit)
+        @controller.send(:refresh)
+      end
+      original.call(model)
+    end
+    MafLibrary::Analyzer.stub(:new, factory) { @controller.send(:refresh) }
+    assert_equal 1, calls
+    assert @controller.instance_variable_get(:@report_stale)
+    assert_equal 1, UI.timers.length
+    run_timer
+    refute @controller.instance_variable_get(:@report_stale)
+  end
+
+  def test_failed_scan_releases_guard_for_retry
+    ready
+    MafLibrary::Analyzer.stub(:new, ->(*) { raise IOError, 'scan failed' }) do
+      assert_raises(IOError) { @controller.send(:refresh) }
+    end
+    refute @controller.instance_variable_get(:@refreshing)
+    @controller.send(:refresh)
+    refute @controller.instance_variable_get(:@report_stale)
+  end
+
+  def test_close_cancels_refresh_and_selection_timers_and_reopen_scans
+    ready
+    assert_includes Sketchup.app_observers, @controller.instance_variable_get(:@app_observer)
+    @model.emit(:onTransactionCommit)
+    @controller.selection_changed
+    queued = UI.timers.values.map(&:last)
+    assert_equal [0, 0.5], UI.timers.values.map(&:first).sort
+    @controller.send(:panel_closed)
+    assert_empty UI.timers
+    assert_empty @model.observers
+    refute_includes Sketchup.app_observers, @controller.instance_variable_get(:@app_observer)
+    old_report = report
+    queued.each(&:call)
+    assert_same old_report, report
+    ready
+    refute_same old_report, report
+    assert_equal 1, @model.observers.length
+  end
+
+  def test_refresh_timer_callback_is_consumed_once_even_if_host_repeats_it
+    ready
+    @controller.report_stale
+    callback = UI.timers.values.first.last
+    run_timer
+    original = report
+    callback.call
+    assert_same original, report
+  end
+
+  def test_loaded_catalog_definition_stamps_scope_and_fingerprint
+    entry = {'id' => 'shared-card', 'scope' => 'shared', 'sha256' => 'sha',
+      'version' => 4, 'recognition_fingerprint' => 'fingerprint'}
+    @controller.send(:stamp_catalog_metadata, @definition, entry)
+    assert_equal 'shared', @definition.get_attribute('MafLibrary', 'catalog_scope')
+    assert_equal 'fingerprint', @definition.get_attribute('MafLibrary', 'recognition_fingerprint')
+  end
+
+  def test_model_change_during_scan_cannot_save_old_model_to_library
+    @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
+    analyzer = MafLibrary::Analyzer.new(@model)
+    original_scan = analyzer.method(:scan)
+    controller = @controller
+    analyzer.define_singleton_method(:scan) do
+      result = original_scan.call
+      Sketchup.active_model = RecognitionControllerModel.new([])
+      controller.model_changed(Sketchup.active_model)
+      result
+    end
+    MafLibrary::Analyzer.stub(:new, analyzer) { ready }
+    assert_empty @catalogs.entries
+    assert_nil report
+    run_timer
+    assert_empty report['models']
+  end
+
+  def test_incomplete_confirmation_recovers_link_after_undo_on_next_timer
+    @definition.entities << Object.new
+    @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
+    ready
+    entry = @catalogs.entries.first
+    %w[catalog_id catalog_scope catalog_version source_sha recognition_fingerprint].each do |key|
+      @definition.set_attribute('MafLibrary', key, nil)
+    end
+    @model.emit(:onTransactionUndo)
+    run_timer
+    assert_equal entry['id'], @definition.get_attribute('MafLibrary', 'catalog_id')
+    assert_equal 1, @catalogs.entries.length
+  end
+
+  def test_windows_and_mac_model_transitions_invalidate_counts_and_old_timer
+    select
+    @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    ready
+    [:onNewModel, :onOpenModel, :onActivateModel].each do |event|
+      @controller.report_stale
+      old_timer = UI.timers.values.first.last
+      old_model = Sketchup.active_model
+      Sketchup.active_model = RecognitionControllerModel.new([])
+      @controller.instance_variable_get(:@app_observer).public_send(event, Sketchup.active_model)
+      assert_nil cards.first['project_placements']
+      assert_empty old_model.observers
+      old_timer.call
+      assert_nil report
+      assert_equal 1, UI.timers.length
+      run_timer
+      assert_equal 0, cards.first['project_placements']
+    end
+  end
+
+  def test_component_selection_is_read_at_click_without_report
+    other = FakeDefinition.new('Other', [FakeEdge.new])
+    other.entities.first.end.position.x = 3
+    select(Sketchup::ComponentInstance.new(other))
+    @dialog.callbacks.fetch('add_selected_to_library').call(nil, 'shared', 'Chosen', 'Seats')
+    assert_equal 'Chosen', @catalogs.entries.first['name']
+    assert_equal 'shared', other.get_attribute('MafLibrary', 'catalog_scope')
+    assert_nil @definition.get_attribute('MafLibrary', 'catalog_id')
+  end
+
+  def test_single_group_selection_without_scan
+    group = Sketchup::Group.new([FakeEdge.new])
+    select(group)
+    @controller.send(:add_selected_to_library, 'personal', 'Group bench', 'Seats')
+    assert_equal 'confirmed', group.definition.get_attribute('MafLibrary', 'maf_decision')
+    assert_equal 1, @catalogs.entries.length
+  end
+
+  def test_extra_edge_or_empty_selection_is_rejected
+    [[], [FakeEdge.new], [@instance, FakeEdge.new], [@instance, @instance]].each do |entities|
+      @model.selection.replace(entities)
+      assert_raises(ArgumentError) { @controller.send(:add_selected_to_library, 'personal', 'X', 'Seats') }
+    end
+    assert_empty @catalogs.entries
+  end
+
+  def test_same_scope_opens_existing_and_cross_scope_requires_explicit_copy
+    select
+    first = @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    again = @controller.send(:add_selected_to_library, 'personal', 'Renamed', 'Seats')
+    assert_equal first['id'], again['id']
+    assert_equal first['id'], @dialog.payloads.last['open_catalog_id']
+    assert_raises(MafLibrary::CatalogSync::Blocked) do
+      @controller.send(:add_selected_to_library, 'shared', 'Copy', 'Seats')
+    end
+    @dialog.callbacks.fetch('copy_selected_to_library').call(nil, 'shared', 'Copy', 'Seats')
+    assert_equal 2, @catalogs.entries.length
+    assert_equal 'shared', @definition.get_attribute('MafLibrary', 'catalog_scope')
+    assert_equal 0, cards.find { |card| card['scope'] == 'personal' }['project_placements']
+    assert_equal 1, cards.find { |card| card['scope'] == 'shared' }['project_placements']
+  end
+
+  def test_decisions_confirm_reject_and_clear_definition
+    ready
+    row_id = report['models'].first['id']
+    %w[confirmed rejected clear].each do |decision|
+      @dialog.callbacks.fetch('set_maf_decision').call(nil, [row_id], decision)
+      expected = decision == 'clear' ? nil : decision
+      actual = @definition.get_attribute('MafLibrary', 'maf_decision')
+      expected.nil? ? assert_nil(actual) : assert_equal(expected, actual)
+      refute report['models'].first['is_maf'] if decision == 'rejected'
+    end
+    assert_raises(ArgumentError) { @controller.send(:set_maf_decision, [row_id], 'wrong') }
+    @model.entities.clear
+    assert_raises(StandardError) { @controller.send(:set_maf_decision, [row_id], 'confirmed') }
+  end
+
+  def test_version_update_restamps_after_save_and_failure_leaves_attrs
+    select
+    entry = @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    @definition.entities.first.end.position.x = 2
+    @controller.send(:update_catalog_version, entry['id'], @definition)
+    saved = @catalogs.find(entry['id'])
+    %w[catalog_version source_sha recognition_fingerprint].zip(%w[version sha256 recognition_fingerprint]).each do |attribute, key|
+      assert_equal saved[key], @definition.get_attribute('MafLibrary', attribute)
+    end
+    assert_equal 2, saved['version']
+    before = @definition.instance_variable_get(:@attrs).dup
+    @definition.define_singleton_method(:save_copy) { |_path| raise IOError, 'disk full' }
+    assert_raises(IOError) { @controller.send(:update_catalog_version, entry['id'], @definition) }
+    assert_equal before, @definition.instance_variable_get(:@attrs)
+    assert_equal 2, @catalogs.find(entry['id'])['version']
+  end
+
+  def test_cloud_match_is_shared_recognition_and_sync_evidence
+    digest = MafLibrary::DefinitionSignature.new(mode: :catalog).call(@definition)[:digest]
+    entry = {'id' => 'remote', 'scope' => 'cloud', 'maf_confirmed' => true,
+      'recognition_fingerprint' => digest, 'version' => 3, 'sha256' => 'remote-sha'}
+    source = Struct.new(:entries).new([entry])
+    @controller.define_singleton_method(:cloud) { source }
+    ready
+    assert_equal 'cloud', @definition.get_attribute('MafLibrary', 'catalog_scope')
+    assert_empty @catalogs.entries
+    assert_equal 1, cards.first['project_placements']
+    assert_raises(ArgumentError) { @controller.send(:update_catalog_version, 'remote', @definition) }
+  end
+
+  def test_sync_errors_survive_metadata_rescan_and_retry
+    @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
+    broken = FakeDefinition.new('Broken', [FakeEdge.new], {['MafLibrary', 'maf_decision'] => 'confirmed'})
+    broken.entities.first.end.position.x = 7
+    broken.define_singleton_method(:save_copy) { |_path| raise IOError, 'disk full' }
+    @model.entities << Sketchup::ComponentInstance.new(broken)
+    ready
+    assert_equal 1, @catalogs.entries.length
+    assert_match(/disk full/, report['catalog_sync_errors'].first[:message])
+    broken.singleton_class.remove_method(:save_copy)
+    @dialog.callbacks.fetch('retry_catalog_sync').call(nil)
+    assert_equal 2, @catalogs.entries.length
+    assert_empty report['catalog_sync_errors']
+  end
+
+  def test_ambiguous_match_does_not_create_card
+    digest = MafLibrary::DefinitionSignature.new(mode: :catalog).call(@definition)[:digest]
+    %w[personal shared].each do |scope|
+      @catalogs.catalog(scope).add_definition(@definition, category: 'Seats', maf_confirmed: true,
+        recognition_fingerprint: digest)
+    end
+    ready
+    assert_equal 2, @catalogs.entries.length
+    assert_nil @definition.get_attribute('MafLibrary', 'catalog_id')
+    assert_includes report['models'].first['recognition_warnings'], 'catalog_match_ambiguous'
+    assert_equal 'catalog_match_ambiguous', report['catalog_sync_errors'].first[:code]
+  end
+
+  def test_closed_panel_errors_use_native_messagebox
+    @controller.instance_variable_set(:@dialog, nil)
+    capture_io { @controller.send(:safely) { raise ArgumentError, 'Select one object' } }
+    assert_match(/Select one object/, UI.messages.last)
+  end
+
+  def test_context_menu_uses_same_direct_selection_flow_and_registers_once
+    UI.context_handlers = []
+    @controller.send(:register_context_menu)
+    @controller.send(:register_context_menu)
+    assert_equal 1, UI.context_handlers.length
+    menu = Object.new
+    items = []
+    menu.define_singleton_method(:add_item) { |label, &block| items << [label, block] }
+    select
+    UI.context_handlers.first.call(menu)
+    assert_equal 1, items.length
+    UI.input_answer = ['Context bench', 'Seats', 'personal']
+    items.first.last.call
+    assert_equal 'Context bench', @catalogs.entries.first['name']
+  end
+end

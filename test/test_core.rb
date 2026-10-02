@@ -722,13 +722,13 @@ class ControllerTest < Minitest::Test
     @controller.send(:register_callbacks)
   end
 
-  def test_opening_panel_does_not_scan_model
+  def test_opening_panel_scans_model
     Sketchup.active_model = FakeModel.new([])
     @dialog.callbacks.fetch('ready').call(nil)
     payload = @dialog.payloads.last
     assert_equal [], payload.fetch('data').fetch('models')
-    assert_nil @controller.instance_variable_get(:@last_report)
-    assert_match(/Анализировать/, payload.fetch('message'))
+    refute_nil @controller.instance_variable_get(:@last_report)
+    assert_match(/Анализ завершен/, payload.fetch('message'))
   end
 
   def test_catalog_refresh_does_not_analyze_model_again
@@ -790,10 +790,10 @@ class ControllerTest < Minitest::Test
     assert_equal [report['models'].first['id']], @dialog.payloads.last.fetch('selected_rows')
   end
 
-  def test_scan_reports_elapsed_time_only_after_button_callback
+  def test_scan_reports_elapsed_time_on_open_and_after_button_callback
     Sketchup.active_model = FakeModel.new([Sketchup::ComponentInstance.new(FakeDefinition.new('Скамья'))])
     @dialog.callbacks.fetch('ready').call(nil)
-    assert_nil @dialog.payloads.last.fetch('analysis_seconds')
+    assert_operator @dialog.payloads.last.fetch('analysis_seconds'), :>=, 0
     @dialog.callbacks.fetch('scan').call(nil)
     payload = @dialog.payloads.last
     assert_equal 1, payload.fetch('data').fetch('summary').fetch('instances')
