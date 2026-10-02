@@ -39,11 +39,28 @@ module MafLibrary
         row['maf_decision'] == 'confirmed' && row['recognition_complete'] && row['recognition_fingerprint']
       end.map { |row| row['recognition_fingerprint'] }
       rows.each { |row| classify(row, confirmed_fingerprints) }
+      rows_by_definition = rows.each_with_object({}) do |row, mapping|
+        Array(row['definition_ids']).each { |id| mapping[id.to_s] = row }
+      end
+      annotate_hierarchy(Array(@report['hierarchy']), rows_by_definition)
       update_counts(rows)
       @report
     end
 
     private
+
+    def annotate_hierarchy(nodes, rows)
+      nodes.each do |node|
+        row = rows[node['definition_id']]
+        node['is_maf'] = !row.nil? && row['is_maf'] == true
+        actionable = row && (node['kind'] != 'group' || node['is_maf'])
+        node['row_id'] = actionable ? row['id'] : nil
+        annotate_hierarchy(Array(node['children']), rows)
+        node['has_maf_descendant'] = Array(node['children']).any? do |child|
+          child['is_maf'] == true || child['has_maf_descendant'] == true
+        end
+      end
+    end
 
     def reference_for(row)
       id = Array(row['definition_ids']).first

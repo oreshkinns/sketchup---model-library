@@ -26,7 +26,8 @@ module MafLibrary
       @signature_cache = {}
       @signature_sampled = {}
       @signature_complete = {}
-      walk(@model.entities, [], false, [])
+      hierarchy = {}
+      walk(@model.entities, [], false, [], hierarchy, 'hierarchy')
       groups = build_groups
       rows = build_rows(groups)
       {'summary' => {'instances' => @definitions.values.sum { |item| item[:placements] },
@@ -34,7 +35,7 @@ module MafLibrary
                      'definitions' => @definitions.size, 'duplicate_groups' => groups.size,
                      'hidden_tags' => rows.flat_map { |row| row['hidden_tags'] }.uniq.length,
                      'sampled_definitions' => @signature_sampled.values.count(true)},
-       'models' => rows, 'duplicates' => groups,
+       'models' => rows, 'duplicates' => groups, 'hierarchy' => hierarchy_nodes(hierarchy),
        'definitions' => @definitions.values.map { |item| {'id' => item[:definition].object_id.to_s,
          'name' => item[:name], 'kind' => item[:kind], 'instances' => item[:placements]} }.sort_by { |item| item['name'] },
        'references' => @definitions}
@@ -42,7 +43,7 @@ module MafLibrary
 
     private
 
-    def walk(entities, ancestors, inherited_lock, path)
+    def walk(entities, ancestors, inherited_lock, path, hierarchy, parent_id)
       entities.each do |entity|
         next unless entity.is_a?(Sketchup::ComponentInstance) || entity.is_a?(Sketchup::Group)
         definition = entity.definition
@@ -52,12 +53,17 @@ module MafLibrary
         full_path = path + [entity]
         catalog_id = definition.get_attribute(DICTIONARY, 'catalog_id') if definition.respond_to?(:get_attribute)
         decision = definition.get_attribute(DICTIONARY, 'maf_decision') if definition.respond_to?(:get_attribute)
-        if kind == 'group' && catalog_id.to_s.empty? && decision != 'confirmed'
+        structural = kind == 'group' && catalog_id.to_s.empty? && decision != 'confirmed'
+        name = kind == 'group' && !entity.name.to_s.strip.empty? ? entity.name.to_s : definition.name.to_s
+        node = (hierarchy[[kind, id]] ||= {'id' => "#{parent_id}/#{kind}:#{id}", 'definition_id' => id.to_s,
+          'row_id' => structural ? nil : "definition:#{id}", 'kind' => kind, 'name' => name,
+          'instances' => 0, 'children' => {}})
+        node['instances'] += 1
+        if structural
           next if ancestors.include?(id)
-          walk(definition.entities, ancestors + [id], inherited_lock || entity.locked?, full_path)
+          walk(definition.entities, ancestors + [id], inherited_lock || entity.locked?, full_path, node['children'], node['id'])
           next
         end
-        name = kind == 'group' && !entity.name.to_s.strip.empty? ? entity.name.to_s : definition.name.to_s
         item = (@definitions[id] ||= {definition: definition, kind: kind, placements: 0, refs: {}, name: name,
                                        category: definition.get_attribute(DICTIONARY, 'category') || 'Без категории',
                                        catalog_id: definition.get_attribute(DICTIONARY, 'catalog_id'),
@@ -72,7 +78,15 @@ module MafLibrary
         tag = hidden_tag(entity)
         reference[:hidden_tags] << tag if tag && !reference[:hidden_tags].include?(tag)
         next if ancestors.include?(id)
-        walk(definition.entities, ancestors + [id], inherited_lock || entity.locked?, full_path)
+        walk(definition.entities, ancestors + [id], inherited_lock || entity.locked?, full_path, node['children'], node['id'])
+      end
+    end
+
+    # Internal sibling maps group definitions only within their parent branch.
+    # Public nodes contain plain arrays/hashes and no SketchUp objects.
+    def hierarchy_nodes(nodes)
+      nodes.values.map do |node|
+        node.merge('children' => hierarchy_nodes(node['children']))
       end
     end
 
