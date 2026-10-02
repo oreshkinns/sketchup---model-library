@@ -1,0 +1,206 @@
+require_relative 'definition_signature'
+require_relative 'recognition_rules'
+
+module MafLibrary
+  # Enriches the existing definition inventory without changing action IDs or
+  # duplicate evidence. All confirmation evidence comes from the local model
+  # and supplied catalog cards; no catalog asset is modified here.
+  class ModelRecognition
+    DICTIONARY = 'MafLibrary'.freeze
+    CATALOG_SCOPES = %w[personal shared cloud].freeze
+
+    def initialize(report, catalog_entries:)
+      @report = report
+      @entries = Array(catalog_entries).select { |entry| CATALOG_SCOPES.include?(entry['scope']) }
+    end
+
+    def apply
+      rows = Array(@report['models'])
+      @evidence = {}
+      rows.each do |row|
+        item = reference_for(row)
+        definition = item && item[:definition]
+        refs = item ? item[:refs].values.map { |ref| ref[:entity] } : []
+        result = definition ? DefinitionSignature.new(mode: :catalog).call(definition) : {}
+        row['recognition_fingerprint'] = result[:digest]
+        row['recognition_complete'] = result[:complete] == true && result[:sampled] != true
+        row['recognition_sampled'] = result[:sampled] == true
+        row['names'] ||= definition ? ([definition.name.to_s] + refs.map { |ref| ref.name.to_s }).uniq : [row['name']]
+        row['tags'] ||= []
+        row['metadata'] = parameters(definition, refs)
+        row['tags'] = (Array(row['tags']) + Array(row['metadata']['extension_attributes']['tags'])).map(&:to_s).uniq
+        row['recognition_warnings'] = []
+        row['recognized_catalog'] = false
+        row['recognized_catalog_scope'] = nil
+        @evidence[row.object_id] = rules_for(row)
+      end
+      # Manual confirmations also recognize independent copies in the project.
+      confirmed_fingerprints = rows.select do |row|
+        row['maf_decision'] == 'confirmed' && row['recognition_complete'] && row['recognition_fingerprint']
+      end.map { |row| row['recognition_fingerprint'] }
+      rows.each { |row| classify(row, confirmed_fingerprints) }
+      update_counts(rows)
+      @report
+    end
+
+    private
+
+    def reference_for(row)
+      id = Array(row['definition_ids']).first
+      references = @report['references'] || {}
+      references[id.to_i] || references[id]
+    end
+
+    def rules_for(row)
+      RecognitionRules.evaluate(names: row['names'], category: row['category'], tags: row['tags'],
+        metadata: row['metadata'], flags: row['metadata']['behavior_flags'], complete: row['recognition_complete'])
+    end
+
+    def classify(row, confirmed_fingerprints)
+      linked = linked_entry(row)
+      rules = @evidence[row.object_id]
+      if row['maf_decision'] == 'rejected'
+        decide(row, false, 'manual', 'manual_rejected')
+      elsif row['maf_decision'] == 'confirmed'
+        decide(row, true, 'manual', 'manual_confirmed')
+        catalog = linked || exact_entry(row)
+        recognize_catalog(row, catalog) if catalog
+      elsif linked
+        decide(row, true, 'catalog', 'confirmed_catalog_link')
+        recognize_catalog(row, linked)
+      elsif rules['reason'] == 'architectural_exclusion'
+        decide(row, false, rules['source'], rules['reason'])
+      elsif row['kind'] == 'group'
+        # An unmarked group is a container. A legacy ID or a geometry match
+        # does not authorize treating that container as a MAF asset.
+        decide(row, false, 'candidate', 'structural_group')
+      else
+        exact = exact_entry(row)
+        project_match = row['recognition_complete'] && row['recognition_fingerprint'] &&
+          confirmed_fingerprints.include?(row['recognition_fingerprint'])
+        if exact || project_match
+          decide(row, true, 'exact_match', 'complete_fingerprint_match')
+          recognize_catalog(row, exact) if exact
+        else
+          decide(row, rules['source'] == 'rule', rules['source'], rules['reason'])
+          row['category'] = rules['category'] if rules['category']
+        end
+      end
+    end
+
+    def decide(row, is_maf, source, reason)
+      row['is_maf'] = is_maf
+      row['recognition_source'] = source
+      row['recognition_reason'] = reason
+    end
+
+    def linked_entry(row)
+      return if row['catalog_id'].to_s.empty?
+      candidates = @entries.select { |entry| entry['id'].to_s == row['catalog_id'].to_s }
+      scope = row['catalog_scope'].to_s
+      candidates = candidates.select { |entry| entry['scope'] == scope } unless scope.empty?
+      return unless candidates.length == 1 && candidates.first['maf_confirmed'] == true
+      candidates.first
+    end
+
+    def exact_entry(row)
+      return unless row['recognition_complete'] && !row['recognition_sampled'] && row['recognition_fingerprint']
+      @entries.find do |entry|
+        entry['maf_confirmed'] == true && entry['recognition_fingerprint'] == row['recognition_fingerprint']
+      end
+    end
+
+    def recognize_catalog(row, entry)
+      row['recognized_catalog'] = true
+      row['recognized_catalog_scope'] = entry['scope']
+      row['catalog_scope'] = entry['scope']
+      row['catalog_id'] = entry['id']
+      # Retain the installed version; a fresh exact match has no installed version.
+      row['catalog_version'] ||= entry['version']
+      saved = entry['recognition_fingerprint']
+      if saved && (!row['recognition_complete'] || row['recognition_fingerprint'] != saved)
+        row['recognition_warnings'] << 'catalog_geometry_drift'
+      end
+    end
+
+    def update_counts(rows)
+      components = rows.select { |row| row['kind'] == 'component' }
+      maf = rows.select { |row| row['is_maf'] == true }
+      summary = (@report['summary'] ||= {})
+      summary['all_component_instances'] = components.sum { |row| row['instances'].to_i }
+      summary['all_component_definitions'] = components.sum { |row| row['definitions'].to_i }
+      summary['maf_instances'] = maf.sum { |row| row['instances'].to_i }
+      summary['maf_definitions'] = maf.sum { |row| row['definitions'].to_i }
+      @report['catalog_placements'] = maf.each_with_object({}) do |row, counts|
+        next unless row['recognized_catalog']
+        key = "#{row['recognized_catalog_scope']}:#{row['catalog_id']}"
+        counts[key] = counts.fetch(key, 0) + row['instances'].to_i
+      end
+    end
+
+    def parameters(definition, refs)
+      flags = {'glued' => false, 'cuts_opening' => false, 'dynamic' => false, 'axes_known' => true}
+      metadata = {'bbox_mm' => [], 'faces_count' => 0, 'edges_count' => 0,
+        'materials_count' => 0, 'nesting_depth' => 0, 'behavior_flags' => flags, 'extension_attributes' => {}}
+      return metadata unless definition
+      if definition.respond_to?(:get_attribute)
+        %w[maf_decision category tags catalog_id catalog_scope catalog_version source_sha recognition_fingerprint].each do |key|
+          value = definition.get_attribute(DICTIONARY, key)
+          metadata['extension_attributes'][key] = value unless value.nil?
+        end
+      end
+      materials = {}
+      collect_geometry(definition, [], 0, metadata, materials)
+      metadata['materials_count'] = materials.length
+      collect_flags(definition, refs, flags)
+      if definition.respond_to?(:bounds)
+        bounds = definition.bounds
+        metadata['bbox_mm'] = [bounds.width, bounds.height, bounds.depth].map { |dimension| dimension.to_f * 25.4 }
+      end
+      metadata
+    rescue StandardError
+      flags['axes_known'] = false
+      metadata
+    end
+
+    def collect_geometry(definition, ancestors, depth, metadata, materials)
+      return if ancestors.include?(definition.object_id)
+      metadata['nesting_depth'] = [metadata['nesting_depth'], depth].max
+      add_materials(definition, materials)
+      definition.entities.each do |entity|
+        add_materials(entity, materials)
+        if entity.is_a?(Sketchup::Face)
+          metadata['faces_count'] += 1
+        elsif entity.is_a?(Sketchup::Edge)
+          metadata['edges_count'] += 1
+        elsif entity.is_a?(Sketchup::ComponentInstance) || entity.is_a?(Sketchup::Group)
+          collect_flags(entity.definition, [entity], metadata['behavior_flags'])
+          collect_geometry(entity.definition, ancestors + [definition.object_id], depth + 1, metadata, materials)
+        end
+      end
+    end
+
+    def add_materials(object, materials)
+      [:material, :back_material].each do |method|
+        material = object.public_send(method) if object.respond_to?(method)
+        materials[material.object_id] = true if material
+      end
+    end
+
+    def collect_flags(definition, refs, flags)
+      flags['glued'] ||= refs.any? { |ref| ref.respond_to?(:glued_to) && ref.glued_to }
+      objects = [definition] + refs
+      flags['dynamic'] ||= objects.any? do |object|
+        object.respond_to?(:attribute_dictionaries) && object.attribute_dictionaries &&
+          object.attribute_dictionaries.any? { |dictionary| dictionary.name.to_s == 'dynamic_attributes' }
+      end
+      return unless definition.respond_to?(:behavior)
+      behavior = definition.behavior
+      flags['cuts_opening'] ||= behavior.respond_to?(:cuts_opening?) && behavior.cuts_opening?
+      flags['glued'] ||= behavior.respond_to?(:is2d?) && behavior.is2d?
+      %i[always_face_camera? cuts_opening? is2d? snapto no_scale_mask? shadows_face_sun?].each do |method|
+        flags[method.to_s] = behavior.public_send(method) if behavior.respond_to?(method)
+      end
+    end
+  end
+end

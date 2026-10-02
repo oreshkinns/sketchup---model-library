@@ -51,7 +51,8 @@ module MafLibrary
         id = definition.object_id
         full_path = path + [entity]
         catalog_id = definition.get_attribute(DICTIONARY, 'catalog_id') if definition.respond_to?(:get_attribute)
-        if kind == 'group' && catalog_id.to_s.empty?
+        decision = definition.get_attribute(DICTIONARY, 'maf_decision') if definition.respond_to?(:get_attribute)
+        if kind == 'group' && catalog_id.to_s.empty? && decision != 'confirmed'
           next if ancestors.include?(id)
           walk(definition.entities, ancestors + [id], inherited_lock || entity.locked?, full_path)
           next
@@ -201,6 +202,10 @@ module MafLibrary
          'status' => duplicate_ids.include?(item[:definition].object_id.to_s) ? 'duplicate' : 'ok',
          'duplicate_classification' => duplicate_classes[item[:definition].object_id.to_s],
          'catalog_id' => item[:catalog_id], 'catalog_version' => item[:catalog_version],
+         'catalog_scope' => item[:definition].get_attribute(DICTIONARY, 'catalog_scope'),
+         'maf_decision' => item[:definition].get_attribute(DICTIONARY, 'maf_decision'),
+         'names' => ([item[:definition].name.to_s] + refs.map { |ref| ref[:entity].name.to_s }).reject { |name| name.strip.empty? }.uniq,
+         'tags' => refs.filter_map { |ref| ref[:entity].layer if ref[:entity].respond_to?(:layer) }.map { |layer| layer.respond_to?(:name) ? layer.name.to_s : layer.to_s }.uniq,
          'recognized_catalog' => recognized, 'hidden_instances' => hidden,
          'hidden_tags' => placement_paths.flat_map { |path| path.filter_map { |entity| hidden_tag(entity) } }.uniq.sort,
          'paths' => paths}
