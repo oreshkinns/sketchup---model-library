@@ -2,6 +2,46 @@ module Sketchup; class ModelObserver; end; end
 require_relative 'test_core'
 
 class DefinitionSignatureTest < Minitest::Test
+  def pbr_definition(properties)
+    material = Struct.new(:name, :color, :alpha, :texture).new('Metal', Struct.new(:to_a).new([10, 20, 30]), 1, nil)
+    properties.each { |key, value| material.define_singleton_method(key) { value } }
+    edge = FakeEdge.new
+    edge.define_singleton_method(:material) { material }
+    FakeDefinition.new('Bench', [edge])
+  end
+
+  def test_pbr_roughness_and_metalness_change_catalog_fingerprints
+    [:roughness_factor, :metallic_factor].each do |field|
+      first = fingerprint(pbr_definition(field => 0.2))
+      second = fingerprint(pbr_definition(field => 0.8))
+      assert first[:complete]
+      assert second[:complete]
+      refute_equal first[:digest], second[:digest], field.to_s
+    end
+  end
+
+  def test_pbr_auxiliary_maps_cannot_authorize_exact_matching
+    [:roughness_texture, :metallic_texture, :normal_texture, :ao_texture].each do |field|
+      definition = pbr_definition(field => Object.new)
+      refute fingerprint(definition)[:complete], field.to_s
+      refute MafLibrary::DefinitionSignature.new(mode: :duplicate).call(definition)[:complete], field.to_s
+      report = MafLibrary::Analyzer.new(FakeModel.new([Sketchup::ComponentInstance.new(definition)])).scan
+      digest = fingerprint(definition)[:digest]
+      MafLibrary::ModelRecognition.new(report, catalog_entries: [{'id' => 'pbr-card', 'scope' => 'personal',
+        'maf_confirmed' => true, 'recognition_fingerprint' => digest}]).apply
+      refute report['models'].first['recognized_catalog'], field.to_s
+    end
+  end
+
+  def test_pbr_workflow_enablement_and_normal_settings_change_evidence
+    {workflow: [0, 1], :roughness_enabled? => [false, true], :metalness_enabled? => [false, true],
+      :normal_enabled? => [false, true], :ao_enabled? => [false, true],
+      ao_strength: [0.2, 0.8], normal_scale: [0.2, 0.8], normal_style: [0, 1]}.each do |field, values|
+      refute_equal fingerprint(pbr_definition(field => values[0]))[:digest],
+        fingerprint(pbr_definition(field => values[1]))[:digest], field.to_s
+    end
+  end
+
   def test_shared_nested_signature_is_read_once_per_mode_without_certifying_incomplete_evidence
     reads = 0
     leaf = FakeDefinition.new('Shared', [FakeEdge.new])

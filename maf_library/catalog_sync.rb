@@ -1,4 +1,5 @@
 require_relative 'definition_signature'
+require_relative 'catalog_recovery'
 
 module MafLibrary
   # Reconciles local confirmation evidence without changing existing assets.
@@ -21,11 +22,8 @@ module MafLibrary
       # Ruby model state is outside SketchUp's undoable attribute dictionaries.
       # Keep identity (never geometry evidence) across new synchronizer instances
       # so Undo or a failed attribute transaction cannot duplicate saved assets.
-      @recovery = @model.instance_variable_get(:@maf_library_catalog_recovery)
-      unless @recovery
-        @recovery = {}
-        @model.instance_variable_set(:@maf_library_catalog_recovery, @recovery)
-      end
+      root = @catalogs.catalog('personal').root if @model.respond_to?(:path) && @model.respond_to?(:guid)
+      @recovery_store = CatalogRecovery.for_model(model: @model, root: root)
     end
 
     def sync(report, write_links: true)
@@ -123,7 +121,7 @@ module MafLibrary
     end
 
     def recovered_entry(definition)
-      identity = @recovery[definition]
+      identity = @recovery_store.recover(definition)
       return unless identity
       entries.find { |entry| entry['scope'] == identity[:scope] && entry['id'] == identity[:id] }
     end
@@ -147,7 +145,7 @@ module MafLibrary
 
     def bind(definition, entry, manual: false, write: true)
       # Record immediately after save, before an operation can fail or be undone.
-      @recovery[definition] = {scope: entry['scope'], id: entry['id']}
+      @recovery_store.record(definition, {scope: entry['scope'], id: entry['id']})
       # Undo/Redo scans recover report identity without adding an operation that
       # would clear Redo. A later user commit can persist the link again.
       return unless write

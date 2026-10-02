@@ -9,6 +9,9 @@ module MafLibrary
     SIGNATURE_SAMPLE_LIMIT = 96
     POINT_TOLERANCE_INCHES = 0.001
     TRANSFORM_TOLERANCE = 0.000001
+    PBR_SCALARS = %i[workflow ao_enabled? ao_strength metalness_enabled? metallic_factor
+      roughness_enabled? roughness_factor normal_enabled? normal_scale normal_style].freeze
+    MATERIAL_TEXTURES = %i[texture ao_texture metallic_texture roughness_texture normal_texture].freeze
 
     # A reader belongs to one analysis pass; create a new reader after edits.
     def initialize(mode: :duplicate)
@@ -224,9 +227,16 @@ module MafLibrary
                         texture.respond_to?(:width) ? texture.width.to_f : nil,
                         texture.respond_to?(:height) ? texture.height.to_f : nil]
                      end
-      [(@mode == :catalog ? '' : material.name.to_s), material.respond_to?(:color) ? material.color.to_a : [],
+      token = [(@mode == :catalog ? '' : material.name.to_s), material.respond_to?(:color) ? material.color.to_a : [],
        material.respond_to?(:alpha) ? material.alpha.to_f : nil, texture_data,
        attributes_token(material)]
+      # Older SketchUp materials keep their existing fingerprint token. Newer
+      # scalar properties affect appearance even without an albedo texture.
+      pbr = PBR_SCALARS.each_with_object({}) do |property, values|
+        values[property] = stable_value(material.public_send(property)) if material.respond_to?(property)
+      end
+      token << pbr unless pbr.empty?
+      token
     end
 
     # A filename and dimensions do not prove that two image files have the
@@ -235,7 +245,7 @@ module MafLibrary
     def textured?(entity)
       %i[material back_material].any? do |method|
         entity.respond_to?(method) && (material = entity.public_send(method)) &&
-          material.respond_to?(:texture) && material.texture
+          MATERIAL_TEXTURES.any? { |property| material.respond_to?(property) && material.public_send(property) }
       end
     rescue StandardError
       true

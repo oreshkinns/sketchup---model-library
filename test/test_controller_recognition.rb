@@ -57,7 +57,7 @@ class RecognitionControllerModel < FakeModel
     emit(:onTransactionCommit)
   end
   def emit(event)
-    @observers.dup.each { |observer| observer.public_send(event, self) }
+    @observers.dup.each { |observer| observer.public_send(event, self) if observer.respond_to?(event) }
   end
 end
 
