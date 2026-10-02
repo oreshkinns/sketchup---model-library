@@ -1,0 +1,6 @@
+{
+  "name": "maf-library-ui",
+  "private": true,
+  "scripts": { "test": "node --test test/ui.test.cjs" },
+  "devDependencies": { "playwright": "1.62.1" }
+}
