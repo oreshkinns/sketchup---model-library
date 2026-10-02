@@ -221,3 +221,103 @@ class CatalogSyncTest
     assert_empty @catalogs.catalog('shared').entries
   end
 end
+
+class CatalogSyncTest
+  def clear_service_link(definition = @definition)
+    %w[catalog_id catalog_scope catalog_version source_sha recognition_fingerprint].each do |key|
+      definition.set_attribute('MafLibrary', key, nil)
+    end
+  end
+
+  def test_incomplete_confirmation_recovers_card_after_undo_of_service_link
+    @definition.entities = [Object.new]
+    assert_equal 1, syncer.sync(report)[:created]
+    original = @catalogs.entries.first
+    clear_service_link
+    result = syncer.sync(current = report)
+    assert_equal 0, result[:created]
+    assert_equal 1, result[:linked]
+    assert_equal 1, @catalogs.entries.length
+    assert_equal original['id'], @definition.get_attribute('MafLibrary', 'catalog_id')
+    assert_nil @catalogs.entries.first['recognition_fingerprint']
+    assert_includes current['models'].first['recognition_warnings'], 'catalog_geometry_unverified'
+  end
+
+  def test_incomplete_confirmation_recovers_saved_card_after_binding_failure
+    @definition.entities = [Object.new]
+    definition = @definition
+    @model.define_singleton_method(:abort_operation) do
+      %w[catalog_id catalog_scope catalog_version source_sha recognition_fingerprint].each do |key|
+        definition.set_attribute('MafLibrary', key, nil)
+      end
+    end
+    @model.define_singleton_method(:commit_operation) { raise IOError, 'binding commit failed' }
+    failed = syncer.sync(report)
+    assert_equal 1, failed[:errors].length
+    assert_equal 1, @catalogs.entries.length
+    assert_nil @definition.get_attribute('MafLibrary', 'catalog_id')
+    original = @catalogs.entries.first
+    @model.singleton_class.remove_method(:commit_operation)
+    retried = syncer.sync(report)
+    assert_equal 0, retried[:created]
+    assert_equal 1, retried[:linked]
+    assert_equal 1, @catalogs.entries.length
+    assert_equal original['id'], @definition.get_attribute('MafLibrary', 'catalog_id')
+  end
+
+  def test_recovery_reuses_identity_but_does_not_certify_changed_geometry
+    syncer.sync(report)
+    original = @catalogs.entries.first
+    @definition.entities.first.end.position.x = 77
+    clear_service_link
+    result = syncer.sync(current = report)
+    assert_equal 0, result[:created]
+    assert_equal 1, @catalogs.entries.length
+    assert_equal original, @catalogs.entries.first
+    assert_includes current['models'].first['recognition_warnings'], 'catalog_geometry_drift'
+    refute_equal original['recognition_fingerprint'], current['models'].first['recognition_fingerprint']
+  end
+
+  def test_recovery_does_not_reuse_another_definition_or_models_incomplete_card
+    @definition.entities = [Object.new]
+    syncer.sync(report)
+    clear_service_link
+    other = FakeDefinition.new('Other', [Object.new], {['MafLibrary', 'maf_decision'] => 'confirmed'})
+    @model.entities.replace([Sketchup::ComponentInstance.new(other)])
+    assert_equal 1, syncer.sync(report)[:created]
+    @model = FakeModel.new([Sketchup::ComponentInstance.new(@definition)])
+    assert_equal 1, syncer.sync(report)[:created]
+    assert_equal 3, @catalogs.entries.length
+  end
+
+  def test_rule_confirmation_reuses_scoped_legacy_card_with_warning
+    @definition.set_attribute('MafLibrary', 'maf_decision', nil)
+    original = @catalogs.catalog('personal').add_definition(@definition, category: 'Seats')
+    @definition.set_attribute('MafLibrary', 'catalog_id', original['id'])
+    @definition.set_attribute('MafLibrary', 'catalog_scope', 'personal')
+    current = report
+    # Use the public enriched-row contract; rule classification is covered by
+    # ModelRecognition tests and does not need duplicate geometry fixtures here.
+    current['models'].first.merge!('is_maf' => true, 'recognition_source' => 'rule')
+    result = syncer.sync(current)
+    assert_equal 0, result[:created]
+    assert_equal 1, result[:linked]
+    assert_equal 1, @catalogs.entries.length
+    assert_equal original['id'], current['models'].first['catalog_id']
+    assert_equal 'legacy_card_unconfirmed', result[:errors].first[:code]
+    refute @catalogs.entries.first['maf_confirmed']
+    assert_equal original, @catalogs.catalog('personal').find(original['id'])
+  end
+end
+
+class CatalogSyncTest
+  def test_direct_selection_recovers_incomplete_card_and_warns_after_link_undo
+    @definition.entities = [Object.new]
+    original = syncer.add_selected(definition: @definition, scope: 'personal', name: 'Bench', category: 'Seats')
+    clear_service_link
+    recovered = syncer.add_selected(definition: @definition, scope: 'personal', name: 'Bench', category: 'Seats')
+    assert_equal original['id'], recovered['id']
+    assert_equal 1, @catalogs.entries.length
+    assert_includes recovered['recognition_warnings'], 'catalog_geometry_unverified'
+  end
+end

@@ -18,6 +18,14 @@ module MafLibrary
     def initialize(model:, catalogs:)
       @model = model
       @catalogs = catalogs
+      # Ruby model state is outside SketchUp's undoable attribute dictionaries.
+      # Keep identity (never geometry evidence) across new synchronizer instances
+      # so Undo or a failed attribute transaction cannot duplicate saved assets.
+      @recovery = @model.instance_variable_get(:@maf_library_catalog_recovery)
+      unless @recovery
+        @recovery = {}
+        @model.instance_variable_set(:@maf_library_catalog_recovery, @recovery)
+      end
     end
 
     def sync(report)
@@ -29,7 +37,7 @@ module MafLibrary
             reference = report.fetch('references').fetch(id.to_i)
             definition = reference.fetch(:definition)
             validate_definition(definition)
-            entry = linked_entry(definition, confirmed_only: row['maf_decision'] != 'confirmed')
+            entry = linked_entry(definition) || recovered_entry(definition)
             fingerprint = complete_fingerprint(row)
             entry ||= exact_entry(fingerprint)
             created = entry.nil?
@@ -45,6 +53,14 @@ module MafLibrary
             row['catalog_version'] = definition.get_attribute(DICTIONARY, 'catalog_version')
             row['recognized_catalog'] = true
             row['recognized_catalog_scope'] = entry['scope']
+            warnings = (row['recognition_warnings'] ||= [])
+            saved_fingerprint = entry['recognition_fingerprint']
+            if saved_fingerprint.nil?
+              warnings << 'catalog_geometry_unverified'
+            elsif saved_fingerprint != fingerprint
+              warnings << 'catalog_geometry_drift'
+            end
+            warnings.uniq!
             result[created ? :created : :linked] += 1
             if entry['maf_confirmed'] != true
               result[:errors] << {row_id: row['id'], catalog_id: entry['id'], scope: entry['scope'],
@@ -67,12 +83,14 @@ module MafLibrary
       raise ArgumentError, 'Эта библиотека доступна только для чтения' unless WRITABLE_SCOPES.include?(scope)
       validate_definition(definition)
       existing = linked_entry(definition)
+      recovering = existing.nil?
+      existing ||= recovered_entry(definition)
       if existing && existing['scope'] != scope && !copy_existing
         raise Blocked, 'Модель уже связана с другой библиотекой. Используйте отдельное действие «Создать копию»'
       end
       if existing && existing['scope'] == scope
         bind(definition, existing, manual: true)
-        return without_scope(existing)
+        return without_scope(existing, recovery_definition: recovering ? definition : nil)
       end
       signature = DefinitionSignature.new(mode: :catalog).call(definition)
       fingerprint = signature[:digest] if signature[:complete] && !signature[:sampled]
@@ -95,15 +113,19 @@ module MafLibrary
       @catalogs.entries
     end
 
-    def linked_entry(definition, confirmed_only: false)
+    def linked_entry(definition)
       id = definition.get_attribute(DICTIONARY, 'catalog_id')
       return if id.to_s.empty?
       scope = definition.get_attribute(DICTIONARY, 'catalog_scope').to_s
       candidates = entries.select { |entry| entry['id'].to_s == id.to_s && (scope.empty? || entry['scope'] == scope) }
       raise Blocked, 'Неоднозначная связь с каталогом. Выберите карточку вручную' if candidates.length > 1
-      entry = candidates.first
-      return if confirmed_only && entry && entry['maf_confirmed'] != true
-      entry
+      candidates.first
+    end
+
+    def recovered_entry(definition)
+      identity = @recovery[definition]
+      return unless identity
+      entries.find { |entry| entry['scope'] == identity[:scope] && entry['id'] == identity[:id] }
     end
 
     def complete_fingerprint(row)
@@ -124,6 +146,8 @@ module MafLibrary
     end
 
     def bind(definition, entry, manual: false)
+      # Record immediately after save, before an operation can fail or be undone.
+      @recovery[definition] = {scope: entry['scope'], id: entry['id']}
       same = definition.get_attribute(DICTIONARY, 'catalog_id') == entry['id'] &&
              definition.get_attribute(DICTIONARY, 'catalog_scope') == entry['scope']
       attributes = {'catalog_id' => entry['id'], 'catalog_scope' => entry['scope']}
@@ -144,9 +168,20 @@ module MafLibrary
       end
     end
 
-    def without_scope(entry)
+    def without_scope(entry, recovery_definition: nil)
       result = entry.reject { |key, _value| key == 'scope' }
-      result['recognition_warnings'] = ['legacy_card_unconfirmed'] if entry['maf_confirmed'] != true
+      warnings = []
+      warnings << 'legacy_card_unconfirmed' if entry['maf_confirmed'] != true
+      if recovery_definition
+        signature = DefinitionSignature.new(mode: :catalog).call(recovery_definition)
+        fingerprint = signature[:digest] if signature[:complete] && !signature[:sampled]
+        if entry['recognition_fingerprint'].nil?
+          warnings << 'catalog_geometry_unverified'
+        elsif entry['recognition_fingerprint'] != fingerprint
+          warnings << 'catalog_geometry_drift'
+        end
+      end
+      result['recognition_warnings'] = warnings unless warnings.empty?
       result
     end
 
