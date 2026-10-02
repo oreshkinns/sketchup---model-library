@@ -315,3 +315,70 @@ class ModelRecognitionTest
     assert_equal 1, report['catalog_placements']['personal:bench']
   end
 end
+
+class ModelRecognitionTest
+  def test_ambiguous_catalog_fingerprints_confirm_maf_without_attributing_a_card
+    definition = FakeDefinition.new('Component#1', [FakeEdge.new])
+    entries = [entry('personal-bench', definition), entry('shared-bench', definition, 'shared')]
+    before = Marshal.dump(entries)
+    [entries, entries.reverse].each do |ordered|
+      report = scan([component(definition)], ordered)
+      row = report['models'].first
+      assert row['is_maf']
+      assert_equal 'exact_match', row['recognition_source']
+      assert_equal 'complete_fingerprint_match', row['recognition_reason']
+      refute row['recognized_catalog']
+      assert_nil row['recognized_catalog_scope']
+      assert_nil row['catalog_id']
+      assert_nil row['catalog_scope']
+      assert_equal ['catalog_match_ambiguous'], row['recognition_warnings']
+      assert_empty report['catalog_placements']
+      assert_equal 1, report.dig('summary', 'maf_instances')
+    end
+    assert_equal before, Marshal.dump(entries)
+  end
+
+  def test_manual_confirmation_keeps_ambiguous_catalog_attribution_absent
+    definition = confirmed('Seat')
+    report = scan([component(definition)], [entry('personal-bench', definition), entry('shared-bench', definition, 'shared')])
+    row = report['models'].first
+    assert row['is_maf']
+    assert_equal 'manual', row['recognition_source']
+    assert_equal 'manual_confirmed', row['recognition_reason']
+    refute row['recognized_catalog']
+    assert_nil row['catalog_id']
+    assert_nil row['catalog_scope']
+    assert_includes row['recognition_warnings'], 'catalog_match_ambiguous'
+    assert_empty report['catalog_placements']
+  end
+
+  def test_unresolved_legacy_id_does_not_choose_between_identical_catalog_fingerprints
+    definition = FakeDefinition.new('Seat', [FakeEdge.new], {['MafLibrary', 'catalog_id'] => 'bench'})
+    report = scan([component(definition)], [entry('bench', definition), entry('bench', definition, 'shared')])
+    row = report['models'].first
+    assert row['is_maf']
+    assert_equal 'exact_match', row['recognition_source']
+    refute row['recognized_catalog']
+    assert_nil row['catalog_id']
+    assert_nil row['catalog_scope']
+    assert_equal 'bench', row['metadata']['extension_attributes']['catalog_id']
+    assert_includes row['recognition_warnings'], 'catalog_match_ambiguous'
+    assert_empty report['catalog_placements']
+  end
+
+  def test_explicit_scoped_link_disambiguates_identical_catalog_fingerprints
+    definition = FakeDefinition.new('Seat', [FakeEdge.new], {['MafLibrary', 'catalog_id'] => 'shared-bench', ['MafLibrary', 'catalog_scope'] => 'shared'})
+    entries = [entry('personal-bench', definition), entry('shared-bench', definition, 'shared')]
+    [entries, entries.reverse].each do |ordered|
+      report = scan([component(definition)], ordered)
+      row = report['models'].first
+      assert row['is_maf']
+      assert_equal 'catalog', row['recognition_source']
+      assert row['recognized_catalog']
+      assert_equal 'shared', row['recognized_catalog_scope']
+      assert_equal 'shared-bench', row['catalog_id']
+      assert_equal({'shared:shared-bench' => 1}, report['catalog_placements'])
+      assert_empty row['recognition_warnings']
+    end
+  end
+end

@@ -63,8 +63,11 @@ module MafLibrary
         decide(row, false, 'manual', 'manual_rejected')
       elsif row['maf_decision'] == 'confirmed'
         decide(row, true, 'manual', 'manual_confirmed')
-        catalog = linked || exact_entry(row)
-        recognize_catalog(row, catalog) if catalog
+        if linked
+          recognize_catalog(row, linked)
+        else
+          attribute_exact_match(row, exact_entries(row))
+        end
       elsif linked
         decide(row, true, 'catalog', 'confirmed_catalog_link')
         recognize_catalog(row, linked)
@@ -75,12 +78,12 @@ module MafLibrary
         # does not authorize treating that container as a MAF asset.
         decide(row, false, 'candidate', 'structural_group')
       else
-        exact = exact_entry(row)
+        exact = exact_entries(row)
         project_match = row['recognition_complete'] && row['recognition_fingerprint'] &&
           confirmed_fingerprints.include?(row['recognition_fingerprint'])
-        if exact || project_match
+        if !exact.empty? || project_match
           decide(row, true, 'exact_match', 'complete_fingerprint_match')
-          recognize_catalog(row, exact) if exact
+          attribute_exact_match(row, exact)
         else
           decide(row, rules['source'] == 'rule', rules['source'], rules['reason'])
           row['category'] = rules['category'] if rules['category']
@@ -103,10 +106,25 @@ module MafLibrary
       candidates.first
     end
 
-    def exact_entry(row)
-      return unless row['recognition_complete'] && !row['recognition_sampled'] && row['recognition_fingerprint']
-      @entries.find do |entry|
+    def exact_entries(row)
+      return [] unless row['recognition_complete'] && !row['recognition_sampled'] && row['recognition_fingerprint']
+      @entries.select do |entry|
         entry['maf_confirmed'] == true && entry['recognition_fingerprint'] == row['recognition_fingerprint']
+      end.uniq { |entry| [entry['scope'], entry['id']] }
+    end
+
+    def attribute_exact_match(row, entries)
+      return if entries.empty?
+      if entries.length == 1
+        recognize_catalog(row, entries.first)
+      else
+        # Matching confirmed geometry proves MAF, but cannot select a catalog
+        # card across distinct identities. Preserve stored link data only in
+        # extension_attributes and leave report attribution unresolved.
+        row['catalog_id'] = nil
+        row['catalog_scope'] = nil
+        row['catalog_version'] = nil
+        row['recognition_warnings'] << 'catalog_match_ambiguous'
       end
     end
 
