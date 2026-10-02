@@ -5,6 +5,7 @@ require 'securerandom'
 require 'base64'
 require 'time'
 require_relative 'metadata'
+require_relative 'definition_signature'
 
 module MafLibrary
   class Catalog
@@ -56,8 +57,8 @@ module MafLibrary
       File.join(root, 'models', "#{id}.skp")
     end
 
-    def add_definition(definition, category:)
-      name = definition.name.to_s.strip
+    def add_definition(definition, category:, name: nil, maf_confirmed: nil, recognition_source: nil, recognition_fingerprint: nil)
+      name = (name.nil? ? definition.name : name).to_s.strip
       raise ArgumentError, 'Компонент должен иметь название' if name.empty?
       FileUtils.mkdir_p(File.join(root, 'models'))
       id = SecureRandom.uuid
@@ -72,6 +73,10 @@ module MafLibrary
                'version' => 1, 'sha256' => Digest::SHA256.file(destination).hexdigest,
                'file_size_bytes' => File.size(destination), 'tags' => [], 'favorite' => false}
       entry.merge!(Metadata.for_definition(definition))
+      unless maf_confirmed.nil?
+        entry.merge!('maf_confirmed' => maf_confirmed == true, 'recognition_source' => recognition_source,
+          'recognition_fingerprint' => recognition_fingerprint)
+      end
       items = entries
       items << entry
       save(items)
@@ -82,6 +87,48 @@ module MafLibrary
       raise
     end
 
+    # Call only for an explicit user-requested version update. Candidate writes
+    # finish before either live file changes; backups cover manifest failures.
+    def update_definition_version(id, definition)
+      items = entries
+      entry = items.find { |item| item['id'] == id }
+      raise ArgumentError, 'Модель не найдена в каталоге' unless entry
+      destination = File.join(root, 'models', "#{id}.skp")
+      raise ArgumentError, 'Файл модели отсутствует в каталоге' unless File.file?(destination)
+      token = SecureRandom.uuid
+      candidate = File.join(root, 'models', ".#{token}.skp")
+      model_backup = "#{destination}.#{token}.rollback"
+      manifest_backup = "#{manifest_path}.#{token}.rollback"
+      original_manifest = File.file?(manifest_path) ? manifest_path : "#{manifest_path}.bak"
+      FileUtils.cp(original_manifest, manifest_backup)
+      saved = definition.respond_to?(:save_copy) ? definition.save_copy(candidate) : definition.save_as(candidate)
+      raise 'SketchUp не сохранил компонент' unless saved && File.file?(candidate)
+      signature = DefinitionSignature.new(mode: :catalog).call(definition)
+      entry.merge!(Metadata.for_definition(definition))
+      entry.merge!('version' => entry['version'].to_i + 1, 'maf_confirmed' => true, 'recognition_source' => 'manual',
+        'sha256' => Digest::SHA256.file(candidate).hexdigest, 'file_size_bytes' => File.size(candidate),
+        'recognition_fingerprint' => signature[:complete] && !signature[:sampled] ? signature[:digest] : nil)
+      File.rename(destination, model_backup)
+      File.rename(candidate, destination)
+      save(items)
+      cleanup_backups = true
+      entry
+    rescue StandardError
+      if model_backup && File.file?(model_backup)
+        FileUtils.mv(model_backup, destination, force: true)
+      end
+      if manifest_backup && File.file?(manifest_backup)
+        File.delete(manifest_path) if original_manifest != manifest_path && File.file?(manifest_path)
+        FileUtils.mv(manifest_backup, original_manifest, force: true)
+      end
+      cleanup_backups = true
+      raise
+    ensure
+      File.delete(candidate) if candidate && File.file?(candidate)
+      if cleanup_backups
+        [model_backup, manifest_backup].compact.each { |path| File.delete(path) if File.file?(path) }
+      end
+    end
     def rename(id, name)
       clean = name.to_s.strip
       raise ArgumentError, 'Укажите название модели' if clean.empty?

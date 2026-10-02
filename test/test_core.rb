@@ -828,3 +828,77 @@ class ControllerTest < Minitest::Test
     assert_equal [instances[0], instances[2]], Sketchup.active_model.active_view.zoomed_entities
   end
 end
+
+class CatalogVersionTest < Minitest::Test
+  def setup
+    @dir = Dir.mktmpdir
+    @catalog = MafLibrary::Catalog.new(@dir)
+    @definition = FakeDefinition.new('Before', [FakeEdge.new])
+    @entry = @catalog.add_definition(@definition, category: 'Seats')
+    @path = @catalog.file_for(@entry['id'])
+    @manifest = File.join(@dir, 'catalog.json')
+    @before_manifest = File.binread(@manifest)
+    @definition.name = 'After'
+    @definition.entities.first.end.position.x = 9
+  end
+
+  def teardown
+    FileUtils.remove_entry(@dir)
+  end
+
+  def test_explicit_update_replaces_bytes_and_increments_version_preserving_card
+    assert_respond_to @catalog, :update_definition_version
+    updated = @catalog.update_definition_version(@entry['id'], @definition)
+    assert_equal @entry['id'], updated['id']
+    assert_equal 'Before', updated['name']
+    assert_equal 'Seats', updated['category']
+    assert_equal 2, updated['version']
+    assert_equal 'saved:After', File.binread(@path)
+    assert_equal Digest::SHA256.hexdigest('saved:After'), updated['sha256']
+    refute_empty updated['recognition_fingerprint']
+    assert_equal updated, @catalog.find(@entry['id'])
+    assert_equal 1, @catalog.entries.length
+  end
+
+  def test_failed_candidate_save_rolls_back_file_and_manifest
+    assert_respond_to @catalog, :update_definition_version
+    @definition.define_singleton_method(:save_copy) { |path| File.write(path, 'partial'); raise IOError, 'candidate failed' }
+    assert_raises(IOError) { @catalog.update_definition_version(@entry['id'], @definition) }
+    assert_equal 'saved:Before', File.binread(@path)
+    assert_equal @before_manifest, File.binread(@manifest)
+    assert_equal [File.basename(@path)], Dir.children(File.dirname(@path))
+  end
+
+  def test_manifest_failure_after_candidate_install_rolls_back_both_files
+    assert_respond_to @catalog, :update_definition_version
+    @catalog.define_singleton_method(:save) { |_items| raise IOError, 'manifest failed' }
+    assert_raises(IOError) { @catalog.update_definition_version(@entry['id'], @definition) }
+    assert_equal 'saved:Before', File.binread(@path)
+    assert_equal @before_manifest, File.binread(@manifest)
+    assert_equal [File.basename(@path)], Dir.children(File.dirname(@path))
+  end
+
+  def test_failure_after_manifest_install_restores_both_original_versions
+    assert_respond_to @catalog, :update_definition_version
+    @catalog.define_singleton_method(:save) { |items| super(items); raise IOError, 'after manifest commit' }
+    assert_raises(IOError) { @catalog.update_definition_version(@entry['id'], @definition) }
+    assert_equal 'saved:Before', File.binread(@path)
+    assert_equal @before_manifest, File.binread(@manifest)
+    assert_equal [File.basename(@path)], Dir.children(File.dirname(@path))
+  end
+end
+
+class CatalogVersionTest
+  def test_explicit_version_update_confirms_the_geometry_actually_saved
+    assert_equal true, @catalog.update_definition_version(@entry['id'], @definition)['maf_confirmed']
+    assert_equal 'manual', @catalog.find(@entry['id'])['recognition_source']
+  end
+
+  def test_failure_restores_manifest_when_catalog_started_from_backup
+    File.rename(@manifest, "#{@manifest}.bak")
+    @catalog.define_singleton_method(:save) { |items| super(items); raise IOError, 'after manifest commit' }
+    assert_raises(IOError) { @catalog.update_definition_version(@entry['id'], @definition) }
+    assert_equal 1, @catalog.find(@entry['id'])['version']
+    assert_equal 'saved:Before', File.binread(@path)
+  end
+end

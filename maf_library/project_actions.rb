@@ -1,3 +1,5 @@
+require_relative 'catalog_sync'
+
 module MafLibrary
   class ProjectActions
     class Blocked < StandardError; end
@@ -134,24 +136,25 @@ module MafLibrary
       refs.length
     end
 
-    def add_to_library(ids, scope)
+    def add_to_library(ids, scope, copy_existing: false)
       rows = selected_rows(ids)
-      catalog = @catalog.catalog(scope)
-      added = definitions(rows).map do |definition|
+      sync = CatalogSync.new(model: @model, catalogs: @catalog)
+      definitions(rows).each do |definition|
         category = definition.get_attribute(Analyzer::DICTIONARY, 'category') || 'Другое'
-        entry = catalog.add_definition(definition, category: category)
-        unless definition.get_attribute(Analyzer::DICTIONARY, 'catalog_id')
-          operation('Привязать МАФ к библиотеке') do
-            definition.set_attribute(Analyzer::DICTIONARY, 'catalog_id', entry['id'])
-            definition.set_attribute(Analyzer::DICTIONARY, 'source_sha', entry['sha256'])
-            definition.set_attribute(Analyzer::DICTIONARY, 'catalog_version', entry['version'])
-          end
-        end
-        entry
-      end
-      added.length
+        sync.add_selected(definition: definition, scope: scope, name: definition.name,
+          category: category, copy_existing: copy_existing)
+      end.length
     end
 
+    def add_selected(scope:, name:, category:, copy_existing: false)
+      selection = @model.selection.to_a
+      entity = selection.first
+      unless selection.length == 1 && (entity.is_a?(Sketchup::ComponentInstance) || entity.is_a?(Sketchup::Group)) && entity.valid?
+        raise Blocked, 'Выделите один компонент или группу в SketchUp'
+      end
+      CatalogSync.new(model: @model, catalogs: @catalog).add_selected(definition: entity.definition,
+        scope: scope, name: name, category: category, copy_existing: copy_existing)
+    end
     def replace(ids, target_id)
       rows = selected_rows(ids)
       raise Blocked, 'Группы объединяются через поиск дублей или окно переименования' if rows.any? { |row| row['kind'] == 'group' }
