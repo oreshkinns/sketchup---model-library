@@ -214,3 +214,83 @@ await p.locator('[data-action="rename"]').click();
 await p.locator('#modal-select').selectOption('all_names');
 assert.match(await p.locator('#action-scope').textContent(),/5.*Двор \/ 2.*Парк \/ 2/s);
 });
+
+for (const [action, callback] of [
+  ['delete', 'delete_rows'], ['rename', 'rename_rows'], ['section', 'move_rows'],
+  ['add-library', 'add_rows_to_library'], ['decision-confirmed', 'set_maf_decision'],
+  ['decision-rejected', 'set_maf_decision'], ['decision-clear', 'set_maf_decision']
+]) {
+  test(`review: ${action} keeps the previewed targets after external selection changes`, async t => {
+    const p = await open(t);
+    await p.locator('.nav [data-page="overview"]').click();
+    await p.locator('[data-node="yard/1"]').click();
+    await p.locator('#selected-menu').click();
+    await p.locator(`[data-action="${action}"]`).click();
+    const scope = await p.locator('#action-scope').textContent();
+    await p.evaluate(() => MAF.receive({selected_rows:['definition:3']}));
+    if (action === 'rename') await p.locator('#modal-input').fill('Новое имя');
+    assert.equal(await p.locator('#action-scope').textContent(), scope);
+    await p.locator('#confirm').click();
+    assert.deepEqual((await calls(p, callback)).at(-1)[1], ['definition:1']);
+  });
+}
+
+test('review: replacement previews and submission bind the same original targets', async t => {
+  const data = fixture();
+  data.definitions = [{id:'target-a',name:'Эталон A',kind:'component'}, {id:'target-b',name:'Эталон B',kind:'component'}];
+  const p = await open(t, data);
+  await p.locator('.nav [data-page="overview"]').click();
+  await p.locator('[data-node="yard/1"]').click();
+  await p.locator('#replace-selected').click();
+  await p.evaluate(() => MAF.receive({selected_rows:['definition:3']}));
+  await p.locator('#modal-select').selectOption('target-b');
+  const previews = await calls(p, 'preview_replace_rows');
+  assert.deepEqual(previews.map(call => call[1]), [['definition:1'], ['definition:1']]);
+  await p.evaluate(token => MAF.receive({replacement_preview:{token,plan:{sources:['Модель 1'],target:'Эталон B',entities:3,placements:3,paths:['Двор / 1','Парк / 1'],blockers:[]}}}), previews.at(-1)[3]);
+  await p.locator('#confirm').click();
+  assert.deepEqual((await calls(p,'replace_rows')).at(-1), ['replace_rows',['definition:1'],'target-b']);
+});
+
+test('review: Ctrl toggles separate branches of one definition independently', async t => {
+  const p = await open(t);
+  await p.locator('.nav [data-page="overview"]').click();
+  const a = p.locator('[data-node="yard/1"]'), b = p.locator('[data-node="park/1"]');
+  await a.click();
+  await b.click({modifiers:['Control']});
+  assert.equal(await a.getAttribute('aria-selected'), 'true');
+  assert.equal(await b.getAttribute('aria-selected'), 'true');
+  assert.deepEqual((await calls(p,'select_rows')).at(-1)[1], ['definition:1']);
+  await a.click({modifiers:['Control']});
+  assert.equal(await a.getAttribute('aria-selected'), 'false');
+  assert.equal(await b.getAttribute('aria-selected'), 'true');
+  assert.deepEqual((await calls(p,'select_rows')).at(-1)[1], ['definition:1']);
+  await b.click({modifiers:['Control']});
+  assert.equal(await b.getAttribute('aria-selected'), 'false');
+  assert.deepEqual((await calls(p,'select_rows')).at(-1)[1], []);
+});
+
+test('review: demo rename updates the visible hierarchy', async t => {
+  const p = await open(t, null, true);
+  await p.locator('.nav [data-page="overview"]').click();
+  await p.locator('[data-node="yard/3"]').click();
+  await p.locator('#selected-menu').click();
+  await p.locator('[data-action="rename"]').click();
+  await p.locator('#modal-input').fill('Новые качели');
+  await p.locator('#confirm').click();
+  assert.match(await p.locator('[data-node="yard/3"]').textContent(), /Новые качели/);
+  assert.doesNotMatch(await p.locator('#models-body').textContent(), /Качели Дуэт/);
+});
+
+test('review: demo delete removes tree rows and updates component, MAF and card counts', async t => {
+  const p = await open(t, null, true);
+  await p.locator('.nav [data-page="overview"]').click();
+  await p.locator('[data-node="yard/3"]').click();
+  await p.locator('#selected-menu').click();
+  await p.locator('[data-action="delete"]').click();
+  await p.locator('#confirm').click();
+  assert.equal(await p.locator('[data-node="yard/3"]').count(), 0);
+  assert.match(await p.locator('#all-component-count').textContent(), /41 размещений.*5 определений/);
+  assert.match(await p.locator('#maf-count').textContent(), /29 размещений.*4 определений/);
+  await p.locator('.nav [data-page="catalog"]').click();
+  assert.equal(await p.locator('[data-card-key="personal:d"] [data-placement-count]').textContent(), 'В текущем проекте: 0 размещений');
+});
