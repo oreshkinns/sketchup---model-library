@@ -90,7 +90,7 @@ class DefinitionSignatureTest
     instance.define_singleton_method(:transformation) { Struct.new(:to_a).new([1, 0, 0, 1.00001]) }
     refute_equal base, fingerprint(FakeDefinition.new('Parent', [instance]))[:digest]
     definition = FakeDefinition.new('A', [FakeEdge.new])
-    definition.define_singleton_method(:behavior) { Struct.new(:always_face_camera).new(true) }
+    definition.define_singleton_method(:behavior) { ApiBehavior.new(true) }
     refute_equal fingerprint(FakeDefinition.new('A', [FakeEdge.new]))[:digest], fingerprint(definition)[:digest]
   end
 
@@ -125,5 +125,40 @@ class DefinitionSignatureTest
     instance = Sketchup::ComponentInstance.new(FakeDefinition.new('Nested', [FakeEdge.new]))
     instance.define_singleton_method(:glued_to) { Object.new }
     refute fingerprint(FakeDefinition.new('Parent', [instance]))[:complete]
+  end
+end
+
+class DefinitionSignatureTest
+  class ApiBehavior
+    def initialize(camera = false, unreadable = false)
+      @camera, @unreadable = camera, unreadable
+    end
+    def always_face_camera?
+      raise 'unreadable behavior' if @unreadable
+      @camera
+    end
+    def cuts_opening?; false; end
+    def is2d?; false; end
+    def snapto; 0; end
+    def no_scale_mask?; 0; end
+    def shadows_face_sun?; false; end
+  end
+
+  def test_api_behavior_changes_catalog_digest
+    first = FakeDefinition.new('A', [FakeEdge.new])
+    second = FakeDefinition.new('B', [FakeEdge.new])
+    first.define_singleton_method(:behavior) { ApiBehavior.new(false) }
+    second.define_singleton_method(:behavior) { ApiBehavior.new(true) }
+    assert fingerprint(first)[:complete]
+    assert fingerprint(second)[:complete]
+    refute_equal fingerprint(first)[:digest], fingerprint(second)[:digest]
+    duplicate = MafLibrary::DefinitionSignature.new(mode: :duplicate)
+    assert_equal duplicate.call(first)[:digest], duplicate.call(second)[:digest]
+  end
+
+  def test_unreadable_api_behavior_is_incomplete
+    definition = FakeDefinition.new('A', [FakeEdge.new])
+    definition.define_singleton_method(:behavior) { ApiBehavior.new(false, true) }
+    refute fingerprint(definition)[:complete]
   end
 end

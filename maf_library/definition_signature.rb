@@ -159,7 +159,13 @@ module MafLibrary
     def behavior_token(definition)
       return {} unless definition.respond_to?(:behavior)
       behavior = definition.behavior
-      %i[always_face_camera cuts_opening snaps_to face_camera locked_to glued_to].each_with_object({}) do |method, result|
+      methods = if @mode == :catalog
+                  %i[always_face_camera? cuts_opening? is2d? snapto no_scale_mask? shadows_face_sun?]
+                else
+                  %i[always_face_camera cuts_opening snaps_to face_camera locked_to glued_to]
+                end
+      @uncertain = true if @mode == :catalog && methods.any? { |method| !behavior.respond_to?(method) }
+      methods.each_with_object({}) do |method, result|
         result[method] = stable_value(behavior.public_send(method)) if behavior.respond_to?(method)
       end
     rescue StandardError
