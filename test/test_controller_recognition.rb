@@ -142,6 +142,7 @@ class ControllerRecognitionTest < Minitest::Test
 
   def ready
     @controller.send(:panel_ready)
+    run_timer
   end
 
   def run_timer
@@ -171,6 +172,17 @@ class ControllerRecognitionTest < Minitest::Test
   def select(entity = @instance)
     @model.selection.clear
     @model.selection.add(entity)
+  end
+
+  def test_opening_panel_defers_analysis_until_after_ready_callback
+    @controller.send(:panel_ready)
+
+    assert_nil report
+    assert_equal [0.5], UI.timers.values.map(&:first)
+
+    run_timer
+    refute_nil report
+    assert_empty UI.timers
   end
 
   def test_open_and_transaction_burst_coalesce_without_synchronous_scan

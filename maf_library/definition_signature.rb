@@ -127,10 +127,32 @@ module MafLibrary
 
     def canonical_loop(points)
       return points if points.length < 2
-      rotations = [points, points.reverse].flat_map do |sequence|
-        sequence.length.times.map { |offset| sequence.rotate(offset) }
+      forward = points.rotate(minimal_rotation_index(points.map(&:inspect)))
+      reversed = points.reverse
+      backward = reversed.rotate(minimal_rotation_index(reversed.map(&:inspect)))
+      forward.to_s <= backward.to_s ? forward : backward
+    end
+
+    # Point tokens are fixed-size coordinate arrays. Their inspected strings
+    # retain the same ordering as the complete rotated loop's string form.
+    def minimal_rotation_index(tokens)
+      length = tokens.length
+      first, second, offset = 0, 1, 0
+      while first < length && second < length && offset < length
+        comparison = tokens[(first + offset) % length] <=> tokens[(second + offset) % length]
+        if comparison.zero?
+          offset += 1
+        elsif comparison.positive?
+          first += offset + 1
+          first += 1 if first == second
+          offset = 0
+        else
+          second += offset + 1
+          second += 1 if second == first
+          offset = 0
+        end
       end
-      rotations.min_by(&:to_s)
+      [first, second].min
     end
 
     def entity_state_token(entity)

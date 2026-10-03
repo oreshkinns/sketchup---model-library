@@ -94,6 +94,9 @@ class CatalogRecoveryTest < Minitest::Test
     controller.instance_variable_set(:@catalogs, @catalogs)
     controller.instance_variable_set(:@dialog, FakeDialog.new)
     controller.send(:panel_ready)
+    timer_id, timer = UI.timers.first
+    UI.timers.delete(timer_id)
+    timer.last.call
     original = @catalogs.entries.first
     @model.undo
     controller.send(:panel_closed)

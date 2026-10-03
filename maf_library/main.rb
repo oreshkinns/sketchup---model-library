@@ -15,6 +15,7 @@ require_relative 'updater'
 require_relative 'pack_transfer'
 require_relative 'metadata'
 require_relative 'array_tool'
+require_relative 'toolbar'
 
 module MafLibrary
   class ListSelectionObserver < Sketchup::SelectionObserver
@@ -300,7 +301,8 @@ module MafLibrary
         Sketchup.add_observer(@app_observer)
         @app_observer_attached = true
       end
-      refresh('Анализ завершен.')
+      queue_refresh
+      mark_report_stale
     end
 
     def refresh(message = nil)
@@ -1066,6 +1068,7 @@ module MafLibrary
     unless file_loaded?(__FILE__)
       @controller.register_context_menu
       UI.menu('Extensions').add_item('МАФ Каталог') { @controller.show }
+      @toolbar = ToolbarButton.install(@controller)
       file_loaded(__FILE__)
     end
   end

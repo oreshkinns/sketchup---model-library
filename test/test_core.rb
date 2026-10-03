@@ -691,6 +691,23 @@ module Sketchup
   end
 end
 
+module UI
+  class << self
+    attr_accessor :timers, :timer_sequence
+
+    def start_timer(delay, repeat, &block)
+      self.timers ||= {}
+      self.timer_sequence = (timer_sequence || 0) + 1
+      timers[timer_sequence] = [delay, repeat, block]
+      timer_sequence
+    end
+
+    def stop_timer(id)
+      timers.delete(id)
+    end
+  end
+end
+
 def file_loaded?(_path) = true
 
 require_relative '../maf_library/main'
@@ -720,15 +737,26 @@ class ControllerTest < Minitest::Test
     @controller.instance_variable_set(:@syncing_selection, false)
     @controller.instance_variable_set(:@selection_timer_pending, false)
     @controller.send(:register_callbacks)
+    UI.timers = {}
   end
 
-  def test_opening_panel_scans_model
+  def run_initial_timer
+    id, timer = UI.timers.first
+    refute_nil timer
+    UI.timers.delete(id)
+    timer.last.call
+  end
+
+  def test_opening_panel_queues_model_scan
     Sketchup.active_model = FakeModel.new([])
     @dialog.callbacks.fetch('ready').call(nil)
+    assert_nil @controller.instance_variable_get(:@last_report)
+    assert_equal [0.5], UI.timers.values.map(&:first)
+    run_initial_timer
     payload = @dialog.payloads.last
     assert_equal [], payload.fetch('data').fetch('models')
     refute_nil @controller.instance_variable_get(:@last_report)
-    assert_match(/Анализ завершен/, payload.fetch('message'))
+    assert_operator payload.fetch('analysis_seconds'), :>=, 0
   end
 
   def test_catalog_refresh_does_not_analyze_model_again
@@ -793,6 +821,7 @@ class ControllerTest < Minitest::Test
   def test_scan_reports_elapsed_time_on_open_and_after_button_callback
     Sketchup.active_model = FakeModel.new([Sketchup::ComponentInstance.new(FakeDefinition.new('Скамья'))])
     @dialog.callbacks.fetch('ready').call(nil)
+    run_initial_timer
     assert_operator @dialog.payloads.last.fetch('analysis_seconds'), :>=, 0
     @dialog.callbacks.fetch('scan').call(nil)
     payload = @dialog.payloads.last

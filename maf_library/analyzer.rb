@@ -19,6 +19,7 @@ module MafLibrary
       @signature_cache = {}
       @signature_sampled = {}
       @signature_complete = {}
+      @seen_paths = {}
     end
 
     def scan
@@ -27,6 +28,7 @@ module MafLibrary
       @signature_cache = {}
       @signature_sampled = {}
       @signature_complete = {}
+      @seen_paths = {}
       hierarchy = {}
       walk(@model.entities, [], false, [], hierarchy, 'hierarchy')
       groups = build_groups
@@ -75,7 +77,12 @@ module MafLibrary
         reference = (item[:refs][entity.object_id] ||= {entity: entity, ancestors: ancestors, locked: false, paths: [], hidden_tags: []})
         reference[:locked] ||= inherited_lock || entity.locked?
         reference[:ancestors] |= ancestors
-        reference[:paths] << full_path unless reference[:paths].any? { |existing| existing == full_path }
+        path_key = full_path.map(&:object_id)
+        seen_paths = (@seen_paths[entity.object_id] ||= {})
+        unless seen_paths.key?(path_key)
+          seen_paths[path_key] = true
+          reference[:paths] << full_path
+        end
         tag = hidden_tag(entity)
         reference[:hidden_tags] << tag if tag && !reference[:hidden_tags].include?(tag)
         next if ancestors.include?(id)
@@ -132,31 +139,40 @@ module MafLibrary
       end
 
       # Similar names or bounds surface review candidates. They never authorize merging.
-      unmatched = items.reject { |item| groups.any? { |group| group['definitions'].any? { |ref| ref['id'] == item[:definition].object_id.to_s } } }
-      adjacency = Hash.new { |hash, key| hash[key] = [] }
-      unmatched.combination(2) do |left, right|
-        next unless left[:kind] == right[:kind]
-        same_name = !left[:name].to_s.empty? && left[:name].to_s.casecmp(right[:name].to_s).zero?
-        left_bounds = bounds_token(left[:definition])
-        right_bounds = bounds_token(right[:definition])
-        same_bounds = !left_bounds.empty? && left_bounds == right_bounds
-        same_structure = candidate_hint_token(left[:definition]) == candidate_hint_token(right[:definition])
-        next unless same_name || same_bounds || same_structure
-        adjacency[left] << right
-        adjacency[right] << left
+      matched_ids = groups.each_with_object({}) do |group, ids|
+        group['definitions'].each { |reference| ids[reference['id']] = true }
       end
-      seen = {}
-      unmatched.each do |item|
-        next if seen[item] || adjacency[item].empty?
-        component = []
-        queue = [item]
-        until queue.empty?
-          current = queue.shift
-          next if seen[current]
-          seen[current] = true
-          component << current
-          queue.concat(adjacency[current])
+      unmatched = items.reject { |item| matched_ids[item[:definition].object_id.to_s] }
+      parents = (0...unmatched.length).to_a
+      find_root = lambda do |index|
+        while parents[index] != index
+          parents[index] = parents[parents[index]]
+          index = parents[index]
         end
+        index
+      end
+      first_by_hint = {}
+      unmatched.each_with_index do |item, index|
+        kind = item[:kind]
+        name = item[:name].to_s
+        bounds = bounds_token(item[:definition])
+        hints = []
+        # String#casecmp folds ASCII letters only; keep the same candidate groups.
+        hints << [kind, :name, name.downcase(:ascii)] unless name.empty?
+        hints << [kind, :bounds, bounds] unless bounds.empty?
+        hints << [kind, :structure, candidate_hint_token(item[:definition])]
+        hints.each do |hint|
+          first = first_by_hint[hint]
+          if first
+            parents[find_root.call(index)] = find_root.call(first)
+          else
+            first_by_hint[hint] = index
+          end
+        end
+      end
+      components = Hash.new { |hash, key| hash[key] = [] }
+      unmatched.each_with_index { |item, index| components[find_root.call(index)] << item }
+      components.each_value do |component|
         groups << make_group(component, 'candidate', false, ['Совпадает имя или габариты; требуется полная проверка']) if component.length > 1
       end
       groups.sort_by { |group| [group['classification'] == 'confirmed' ? 0 : 1, group['label']] }
