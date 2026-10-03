@@ -92,11 +92,18 @@ class CatalogRecoveryTest < Minitest::Test
     controller = MafLibrary::Controller.new
     controller.instance_variable_set(:@settings, @settings)
     controller.instance_variable_set(:@catalogs, @catalogs)
-    controller.instance_variable_set(:@dialog, FakeDialog.new)
+    dialog = FakeDialog.new
+    controller.instance_variable_set(:@dialog, dialog)
+    controller.send(:register_callbacks)
     controller.send(:panel_ready)
-    timer_id, timer = UI.timers.first
-    UI.timers.delete(timer_id)
-    timer.last.call
+    dialog.callbacks.fetch('scan').call(nil)
+    1000.times do
+      timer_id, timer = UI.timers.first
+      break unless timer
+      UI.timers.delete(timer_id)
+      timer.last.call
+    end
+    assert_empty UI.timers, 'analysis did not finish within 1000 timer steps'
     original = @catalogs.entries.first
     @model.undo
     controller.send(:panel_closed)

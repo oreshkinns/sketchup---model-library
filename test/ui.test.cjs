@@ -41,6 +41,60 @@ assert.equal(await p.locator('#page-title').textContent(),'Библиотека 
 assert.equal(await p.locator('#add-selected').textContent(),'Добавить выделенный в SketchUp');
 assert.match(await p.locator('#import').textContent(),/Добавить файл .skp/);
 });
+
+test('opening the panel never starts a scan and manual start exposes Stop',async t=>{
+const p=await open(t);
+assert.deepEqual((await calls(p,'ready')).length,1);
+assert.deepEqual((await calls(p,'scan')).length,0);
+assert.equal(await p.locator('#scan').isEnabled(),true);
+assert.equal(await p.locator('#stop-scan').isHidden(),true);
+await p.locator('#scan').click();
+assert.equal((await calls(p,'scan')).length,1);
+assert.equal(await p.locator('#scan').isDisabled(),true);
+assert.equal(await p.locator('#stop-scan').isVisible(),true);
+assert.equal(await p.locator('#stop-scan').isEnabled(),true);
+});
+
+test('Stop requests cancellation once and waits for backend acknowledgement',async t=>{
+const p=await open(t);
+await p.locator('#scan').click();
+await p.locator('#stop-scan').click();
+assert.equal((await calls(p,'cancel_scan')).length,1);
+assert.equal(await p.locator('#scan').isDisabled(),true);
+assert.equal(await p.locator('#stop-scan').isDisabled(),true);
+assert.match(await p.locator('#status').textContent(),/ожидаем остановки/i);
+await p.evaluate(()=>MAF.receive({report_stale:true}));
+assert.equal(await p.locator('#scan').isDisabled(),true);
+await p.evaluate(()=>MAF.receive({scan_state:'running'}));
+assert.equal(await p.locator('#stop-scan').isDisabled(),true);
+await p.evaluate(()=>MAF.receive({scan_state:'idle'}));
+assert.equal(await p.locator('#scan').isEnabled(),true);
+assert.equal(await p.locator('#stop-scan').isHidden(),true);
+assert.match(await p.locator('#status').textContent(),/анализ остановлен/i);
+});
+
+test('failed Stop request keeps the Stop control available for retry',async t=>{
+const p=await open(t);
+await p.locator('#scan').click();
+await p.evaluate(()=>{window.sketchup={}});
+await p.locator('#stop-scan').click();
+assert.equal(await p.locator('#scan').isDisabled(),true);
+assert.equal(await p.locator('#stop-scan').isEnabled(),true);
+assert.match(await p.locator('#status').textContent(),/не удалось отправить запрос/i);
+});
+
+test('backend scan state restores controls without mistaking another error for scan completion',async t=>{
+const p=await open(t);
+await p.evaluate(()=>MAF.receive({scan_state:'running'}));
+assert.equal(await p.locator('#scan').isDisabled(),true);
+assert.equal(await p.locator('#stop-scan').isEnabled(),true);
+await p.evaluate(()=>MAF.receive({error:'Ошибка другого действия',message:'Ошибка другого действия'}));
+assert.equal(await p.locator('#scan').isDisabled(),true);
+await p.evaluate(()=>MAF.receive({scan_state:'idle',analysis_seconds:1.25,message:'Анализ завершен.'}));
+assert.equal(await p.locator('#scan').isEnabled(),true);
+assert.equal(await p.locator('#stop-scan').isHidden(),true);
+assert.match(await p.locator('#analysis-time').textContent(),/1\.25 с/);
+});
 test('hierarchy preserves branch counts, collapse and MAF ancestor paths',async t=>{
 const p=await open(t);
 await p.locator('.nav [data-page="overview"]').click();

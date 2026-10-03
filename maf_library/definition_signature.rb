@@ -28,6 +28,137 @@ module MafLibrary
       {digest: digest, complete: !!@signature_complete[definition.object_id] && !@uncertain, sampled: !!@signature_sampled[definition.object_id]}
     end
 
+    def start_call(definition)
+      Session.new(self, definition)
+    end
+
+    # Keep traversal state in plain Ruby frames. A shared budget limits the
+    # complete nested tree, rather than separately limiting each definition.
+    class Session
+      attr_reader :result, :processed
+
+      def initialize(reader, definition)
+        @reader, @definition = reader, definition
+        @frames = []
+        @active = {}
+        @cancelled = false
+        @done = false
+        push_frame(definition) unless cache.key?(definition.object_id)
+      end
+
+      def done?
+        @done
+      end
+
+      def cancel!
+        @cancelled = true
+        @frames.clear
+        @result = nil
+      end
+
+      def step(max_entities: 100, deadline: nil)
+        raise ArgumentError, 'max_entities must be positive' unless max_entities.to_i.positive?
+        @processed = 0
+        return false if @cancelled
+        return true if done?
+        while @processed < max_entities.to_i
+          break if deadline && Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+          if @frames.empty?
+            id = @definition.object_id
+            @result = {digest: cache[id], complete: !!complete[id], sampled: !!sampled[id]}
+            @done = true
+            return true
+          end
+          frame = @frames.last
+          if frame[:index] >= frame[:indexes].length && !frame[:entity]
+            finish_frame(frame)
+            @processed += 1
+            next
+          end
+          unless frame[:entity]
+            frame[:entity] = frame[:entities][frame[:indexes][frame[:index]]]
+            frame[:index] += 1
+            @processed += 1
+          end
+          entity = frame[:entity]
+          nested = entity.is_a?(Sketchup::ComponentInstance) || entity.is_a?(Sketchup::Group)
+          if nested && !cache.key?(entity.definition.object_id) && !@active[entity.definition.object_id]
+            push_frame(entity.definition)
+            next
+          end
+          @reader.instance_variable_set(:@uncertain, frame[:uncertain])
+          token = nested && @active[entity.definition.object_id] ? nil : @reader.__send__(:entity_token, entity, [])
+          frame[:tokens] << token
+          frame[:textured] ||= @reader.__send__(:textured?, entity)
+          frame[:sampled] ||= nested && sampled[entity.definition.object_id]
+          frame[:uncertain] = @reader.instance_variable_get(:@uncertain)
+          frame[:entity] = nil
+        end
+        false
+      rescue StandardError
+        # Match the synchronous reader's incomplete-evidence contract when an
+        # entity collection becomes unreadable, without aborting the report.
+        raise unless frame
+        id = frame[:definition].object_id
+        cache[id] = nil
+        complete[id] = false
+        @frames.pop
+        @active.delete(id)
+        @processed += 1
+        false
+      end
+
+      private
+
+      def cache
+        @reader.instance_variable_get(:@signature_cache)
+      end
+
+      def complete
+        @reader.instance_variable_get(:@signature_complete)
+      end
+
+      def sampled
+        @reader.instance_variable_get(:@signature_sampled)
+      end
+
+      def push_frame(definition)
+        entities = definition.entities
+        length = entities.length
+        indexes = length <= SIGNATURE_SAMPLE_LIMIT ? (0...length).to_a :
+          (0...SIGNATURE_SAMPLE_LIMIT).map { |index| index * (length - 1) / (SIGNATURE_SAMPLE_LIMIT - 1) }
+        @active[definition.object_id] = true
+        @frames << {definition: definition, entities: entities, length: length, indexes: indexes,
+                    index: 0, tokens: [], sampled: length > SIGNATURE_SAMPLE_LIMIT, uncertain: false, textured: false}
+      rescue StandardError
+        cache[definition.object_id] = nil
+        complete[definition.object_id] = false
+      end
+
+      def finish_frame(frame)
+        definition, tokens = frame.values_at(:definition, :tokens)
+        id = definition.object_id
+        @reader.instance_variable_set(:@uncertain, frame[:uncertain])
+        evidence = [frame[:length], @reader.__send__(:bounds_token, definition),
+          @reader.__send__(:attributes_token, definition),
+          (@reader.instance_variable_get(:@mode) == :duplicate ? @reader.__send__(:library_metadata_token, definition) : []),
+          @reader.__send__(:behavior_token, definition), tokens.sort_by(&:to_s)]
+        if @reader.instance_variable_get(:@mode) == :catalog
+          evidence << (definition.respond_to?(:insertion_point) ? @reader.__send__(:point_token, definition.insertion_point) : [])
+        end
+        sampled[id] = !!frame[:sampled]
+        complete[id] = !sampled[id] && !frame[:textured] && tokens.none?(&:nil?) &&
+          tokens.none? { |token| @reader.__send__(:contains_unknown?, token) } && !@reader.instance_variable_get(:@uncertain)
+        cache[id] = Digest::SHA256.hexdigest(JSON.generate(evidence))
+      rescue StandardError
+        cache[id] = nil
+        complete[id] = false
+      ensure
+        @frames.pop
+        @active.delete(id)
+      end
+    end
+
     private
 
     def signature(definition, stack)

@@ -55,6 +55,12 @@ module MafLibrary
     end
 
     alias_method :onTransactionRedo, :onTransactionUndo
+
+    def onActivePathChanged(model)
+      # Entering edit context does not create a user transaction. Preserve the
+      # read-only reconciliation state left by Undo/Redo.
+      @controller.report_stale(model, read_only: nil)
+    end
   end
 
   class ReportAppObserver < (defined?(Sketchup::AppObserver) ? Sketchup::AppObserver : Object)
@@ -107,6 +113,8 @@ module MafLibrary
       @report_observer = ReportModelObserver.new(self)
       @app_observer = ReportAppObserver.new(self)
       @timer_generation = 0
+      @scan_job = nil
+      @scan_timer_id = nil
     end
 
     def show
@@ -137,34 +145,25 @@ module MafLibrary
       @selection_timer_id = timer_id
     end
 
-    def queue_refresh
-      return if @panel_closed || !@dialog || !@dialog.visible?
-      @pending_change = true
-      return if @refreshing || @refresh_timer_id
-      generation, current_model = @timer_generation, model
-      timer_id = UI.start_timer(0.5, false) do
-        next unless @refresh_timer_id == timer_id && generation == @timer_generation && current_model == model && !@panel_closed
-        UI.stop_timer(timer_id)
-        @refresh_timer_id = nil
-        safely { refresh }
-      end
-      @refresh_timer_id = timer_id
-    end
-
     def report_stale(changed_model = model, read_only: false)
       return if changed_model != model || @service_writing || @panel_closed
       # Native transaction-start callbacks are deferred until commit, so they
       # cannot safely prove that a delayed timer can append a transparent write.
       # Keep ordinary persistent writes, but never regenerate them after Undo.
-      @read_only_reconciliation = read_only
-      queue_refresh
-      mark_report_stale
+      @read_only_reconciliation = read_only unless read_only.nil?
+      @pending_change = true if @refreshing
+      if @scan_job
+        stop_scan('Модель изменилась. Анализ остановлен.')
+      else
+        mark_report_stale
+      end
     rescue StandardError => error
       warn("МАФ Каталог: observer: #{error.message}")
     end
 
     def model_changed(current_model)
       return if @panel_closed || current_model != model || @last_model == current_model
+      stop_scan('Открыта другая модель. Анализ остановлен.') if @scan_job
       cancel_timers
       detach_model_observers
       @last_report = nil
@@ -194,7 +193,8 @@ module MafLibrary
 
     def register_callbacks
       @dialog.add_action_callback('ready') { |_context| safely { panel_ready } }
-      @dialog.add_action_callback('scan') { |_context| safely { refresh('Анализ завершен.') } }
+      @dialog.add_action_callback('scan') { |_context| safely { start_scan } }
+      @dialog.add_action_callback('cancel_scan') { |_context| safely { stop_scan } }
       @dialog.add_action_callback('set_maf_decision') do |_context, ids, decision|
         safely { set_maf_decision(ids, decision.to_s) }
       end
@@ -204,7 +204,9 @@ module MafLibrary
       @dialog.add_action_callback('copy_selected_to_library') do |_context, scope, name, category|
         safely { add_selected_to_library(scope.to_s, name, category, copy_existing: true) }
       end
-      @dialog.add_action_callback('retry_catalog_sync') { |_context| safely { refresh } }
+      @dialog.add_action_callback('retry_catalog_sync') do |_context|
+        safely { push(message: 'Запустите анализ модели, чтобы повторить запись в библиотеку.') }
+      end
       @dialog.add_action_callback('update_catalog_version') do |_context, id, definition_id, scope|
         safely { update_catalog_version(id.to_s, definition_id, scope) }
       end
@@ -301,59 +303,204 @@ module MafLibrary
         Sketchup.add_observer(@app_observer)
         @app_observer_attached = true
       end
-      queue_refresh
+      @read_only_reconciliation = false if @last_model != model
+      @last_model = model
+      attach_report_observer
+      attach_selection_observer
       mark_report_stale
+      refresh_catalog(nil)
     end
 
-    def refresh(message = nil)
-      if @refreshing
-        @pending_change = true
+    # The only entry point for model-wide accounting. Every phase yields to
+    # SketchUp's UI loop so the Stop callback can run before the next unit.
+    def start_scan
+      return push(scan_state: 'running') if @scan_job
+      current_model = model
+      if @last_model != current_model
+        @selected_row_ids = []
+        @read_only_reconciliation = false
+      end
+      @last_model = current_model
+      attach_report_observer
+      attach_selection_observer
+      @pending_change = false
+      @refreshing = true
+      mark_report_stale
+      catalogs = recognition_catalogs
+      @scan_job = {
+        model: current_model, generation: @timer_generation,
+        active_path: active_path_signature(current_model),
+        started_at: Process.clock_gettime(Process::CLOCK_MONOTONIC),
+        catalogs: catalogs, phase: :analyze,
+        session: Analyzer.new(current_model).start_scan
+      }
+      push(scan_state: 'running', message: 'Анализ модели выполняется…')
+      schedule_scan_step(@scan_job)
+    rescue StandardError => error
+      scan_failed(error)
+    end
+
+    def stop_scan(message = 'Анализ остановлен.', notify: true)
+      if @scan_timer_id
+        UI.stop_timer(@scan_timer_id)
+        @scan_timer_id = nil
+      end
+      was_running = !!@scan_job
+      @scan_job = nil
+      @refreshing = false if was_running
+      @pending_change = false if was_running
+      if was_running
+        @report_stale = true
+        push(report_stale: true, scan_state: 'idle', message: message) if notify && !@panel_closed
+      elsif notify && !@panel_closed
+        push(scan_state: 'idle')
+      end
+    end
+
+    def schedule_scan_step(job)
+      return unless @scan_job.equal?(job)
+      timer_id = UI.start_timer(0.01, false) do
+        next unless @scan_timer_id == timer_id && @scan_job.equal?(job)
+        @scan_timer_id = nil
+        advance_scan(job)
+      end
+      @scan_timer_id = timer_id
+    end
+
+    def advance_scan(job)
+      unless @scan_job.equal?(job) && job[:model] == model &&
+             job[:generation] == @timer_generation && !@panel_closed &&
+             job[:active_path] == active_path_signature(job[:model])
+        stop_scan('Модель изменилась. Анализ остановлен.')
         return
       end
-      UI.stop_timer(@refresh_timer_id) if @refresh_timer_id
-      @refresh_timer_id = nil
-      @refreshing = true
-      @pending_change = false
-      begin
-        if @last_model != model
-          @selected_row_ids = []
-          @read_only_reconciliation = false
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 0.02
+      case job[:phase]
+      when :analyze, :analyze_again
+        if job[:session].step(max_entities: 100, deadline: deadline)
+          job[:report] = job[:session].result
+          job[:session] = ModelRecognition.new(job[:report], catalog_entries: job[:catalogs].entries).start_apply
+          job[:phase] = job[:phase] == :analyze ? :recognize : :recognize_again
         end
-        @last_model = model
-        attach_report_observer
-        attach_selection_observer
-        mark_report_stale
-        started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        current_model, generation = @last_model, @timer_generation
-        catalogs = recognition_catalogs
-        current_report = recognized_report(current_model, catalogs.entries)
-        return unless current_model == model && generation == @timer_generation && !@panel_closed
-        before = link_snapshot(current_report)
-        result = with_service_writes { CatalogSync.new(model: current_model, catalogs: catalogs).sync(current_report, write_links: !@read_only_reconciliation) }
-        if before != link_snapshot(current_report)
-          current_report = recognized_report(current_model, catalogs.entries)
+      when :recognize
+        if job[:session].step(max_rows: 10, deadline: deadline)
+          job[:report] = job[:session].result
+          job[:links_before] = link_snapshot(job[:report])
+          job[:session] = CatalogSync.new(model: job[:model], catalogs: job[:catalogs]).start_sync(
+            job[:report], write_links: !@read_only_reconciliation)
+          job[:phase] = :sync
         end
-        return unless current_model == model && generation == @timer_generation && !@panel_closed
-        current_report['catalog_sync_errors'] = result[:errors]
-        @last_report = current_report
-        @report_stale = !!@pending_change
-        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
-        data = @last_report.reject { |key, _value| key == 'references' }
-        data['catalog'] = @catalogs.entries.map { |entry| catalog_card(entry) }
-        data['catalog'].concat(cloud_cards) if cloud
-        data['sections'] = @settings.sections
-        data['settings'] = @settings.paths.merge('cloud_url' => @settings.cloud_url)
-        data['cleanup'] = {'unused_definitions' => model.definitions.count do |definition|
-          !definition.group? && !definition.image? && definition.count_used_instances == 0
-        end}
-        valid_ids = data['models'].map { |row| row['id'] }
-        @selected_row_ids &= valid_ids
-        push(data: data, selected_rows: @selected_row_ids, message: message, report_stale: @report_stale,
-             mode: 'ОТКРЫТЫЙ ПРОЕКТ · SKETCHUP', analysis_seconds: elapsed.round(2))
-      ensure
-        @refreshing = false
-        queue_refresh if @pending_change
+      when :sync
+        completed = with_service_writes { job[:session].step(max_definitions: 5, deadline: deadline) }
+        if completed
+          job[:sync_result] = job[:session].result
+          if job[:links_before] != link_snapshot(job[:report])
+            job[:session] = Analyzer.new(job[:model]).start_scan
+            job[:phase] = :analyze_again
+          else
+            prepare_scan_cards(job)
+          end
+        end
+      when :recognize_again
+        if job[:session].step(max_rows: 10, deadline: deadline)
+          job[:report] = job[:session].result
+          prepare_scan_cards(job)
+        end
+      when :cards
+        advance_scan_cards(job, deadline)
+      when :cleanup
+        advance_scan_cleanup(job, deadline)
+      else
+        raise "Неизвестная стадия анализа: #{job[:phase]}"
       end
+      schedule_scan_step(job) if @scan_job.equal?(job)
+    rescue StandardError => error
+      scan_failed(error)
+    end
+
+    def prepare_scan_cards(job)
+      job[:report]['catalog_sync_errors'] = job[:sync_result][:errors]
+      job[:local_entries] = @catalogs.entries
+      source = cloud
+      job[:remote_entries] = source ? source.entries : []
+      job[:cards] = []
+      job[:card_index] = 0
+      job[:phase] = :cards
+    end
+
+    def advance_scan_cards(job, deadline)
+      local = job[:local_entries]
+      remote = job[:remote_entries]
+      total = local.length + remote.length
+      processed = 0
+      while job[:card_index] < total
+        break if processed >= 5 || (processed.positive? && Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline)
+        index = job[:card_index]
+        if index < local.length
+          entry = local[index]
+          card = catalog_card(entry)
+        else
+          entry = remote[index - local.length]
+          card = entry.merge('thumbnail' => entry['thumbnail_url'], 'favorite' => @settings.cloud_favorite?(entry['id']),
+            'last_used_at' => @settings.cloud_last_used_at(entry['id']))
+        end
+        card['project_placements'] = job[:report].fetch('catalog_placements', {}).fetch("#{entry['scope']}:#{entry['id']}", 0)
+        job[:cards] << card
+        job[:card_index] += 1
+        processed += 1
+      end
+      return unless job[:card_index] >= total
+      job[:definitions] = job[:model].definitions.to_a
+      job[:definition_index] = 0
+      job[:unused_definitions] = 0
+      job[:phase] = :cleanup
+    end
+
+    def advance_scan_cleanup(job, deadline)
+      processed = 0
+      definitions = job[:definitions]
+      while job[:definition_index] < definitions.length
+        break if processed >= 100 || (processed.positive? && Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline)
+        definition = definitions[job[:definition_index]]
+        job[:unused_definitions] += 1 if !definition.group? && !definition.image? && definition.count_used_instances == 0
+        job[:definition_index] += 1
+        processed += 1
+      end
+      finish_scan(job) if job[:definition_index] >= definitions.length
+    end
+
+    def finish_scan(job)
+      return unless @scan_job.equal?(job)
+      report = job[:report]
+      @last_report = report
+      @report_stale = false
+      @refreshing = false
+      @scan_job = nil
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - job[:started_at]
+      data = report.reject { |key, _value| key == 'references' }
+      data['catalog'] = job[:cards]
+      data['sections'] = @settings.sections
+      data['settings'] = @settings.paths.merge('cloud_url' => @settings.cloud_url)
+      data['cleanup'] = {'unused_definitions' => job[:unused_definitions]}
+      valid_ids = data['models'].map { |row| row['id'] }
+      @selected_row_ids &= valid_ids
+      push(data: data, selected_rows: @selected_row_ids, message: 'Анализ завершен.', report_stale: false,
+        scan_state: 'idle', mode: 'ОТКРЫТЫЙ ПРОЕКТ · SKETCHUP', analysis_seconds: elapsed.round(2))
+    end
+
+    def scan_failed(error)
+      warn("МАФ Каталог · анализ: #{error.class}: #{error.message}\n#{error.backtrace&.first(5)&.join("\n")}")
+      UI.stop_timer(@scan_timer_id) if @scan_timer_id
+      @scan_timer_id = nil
+      @scan_job = nil
+      @refreshing = false
+      @report_stale = true
+      push(scan_state: 'idle', report_stale: true, message: "Ошибка анализа: #{error.message}", error: true) if @dialog && @dialog.visible? && !@panel_closed
+    end
+
+    def active_path_signature(current_model)
+      return [] unless current_model.respond_to?(:active_path)
+      Array(current_model.active_path).map(&:object_id)
     end
 
     def attach_report_observer
@@ -371,9 +518,19 @@ module MafLibrary
       push(report_stale: true)
     end
 
+    def invalidate_report(message = nil, catalog_changed: false)
+      stop_scan('Модель изменена. Анализ остановлен.') if @scan_job
+      @read_only_reconciliation = false
+      @pending_change = true if @refreshing
+      mark_report_stale
+      catalog_changed ? refresh_catalog(message) : push(message: message)
+    end
+
     def cancel_timers
-      [@refresh_timer_id, @selection_timer_id].compact.each { |id| UI.stop_timer(id) }
-      @refresh_timer_id = @selection_timer_id = nil
+      [@refresh_timer_id, @selection_timer_id, @scan_timer_id].compact.each { |id| UI.stop_timer(id) }
+      @refresh_timer_id = @selection_timer_id = @scan_timer_id = nil
+      @scan_job = nil
+      @refreshing = false
       @selection_timer_pending = @pending_change = false
       @timer_generation = (@timer_generation || 0) + 1
     end
@@ -394,10 +551,6 @@ module MafLibrary
 
     def recognition_catalogs
       RecognitionCatalogs.new(@catalogs, cloud ? cloud.entries : [])
-    end
-
-    def recognized_report(current_model, entries)
-      ModelRecognition.new(Analyzer.new(current_model).scan, catalog_entries: entries).apply
     end
 
     def link_snapshot(report)
@@ -428,6 +581,8 @@ module MafLibrary
     end
 
     def refresh_catalog(message)
+      # Catalog actions can change the sources retained by a queued scan.
+      stop_scan('Каталог изменён. Анализ остановлен.') if @scan_job
       cards = @catalogs.entries.map { |entry| catalog_card(entry) }
       cards.concat(cloud_cards) if cloud
       push(catalog_update: {'catalog' => cards, 'sections' => @settings.sections,
@@ -572,42 +727,71 @@ module MafLibrary
     end
 
     def actions_for(ids, catalogs: @catalogs)
-      raise 'Модель изменилась. Запустите анализ повторно' unless @last_model == model && @last_report
-      current = Analyzer.new(model).scan
-      Array(ids).each do |id|
-        old_row = @last_report['models'].find { |row| row['id'] == id }
-        new_row = current['models'].find { |row| row['id'] == id }
-        unless old_row && new_row && old_row['definition_ids'] == new_row['definition_ids'] && old_row['instances'] == new_row['instances']
-          raise 'Состав выбранных моделей изменился. Запустите анализ повторно'
-        end
-      end
+      current = report_for_rows(ids)
       ProjectActions.new(model, current, catalogs)
+    end
+
+    def fresh_report
+      raise 'Модель изменилась. Запустите анализ повторно' unless @last_model == model && @last_report
+      raise 'Отчет устарел после изменения модели. Запустите анализ повторно' if @report_stale
+      @last_report
+    end
+
+    def report_for_rows(ids)
+      report = fresh_report
+      definition_ids = Array(ids).flat_map do |id|
+        row = report['models'].find { |item| item['id'] == id.to_s }
+        raise 'Состав выбранных моделей изменился. Запустите анализ повторно' unless row
+        row['definition_ids']
+      end
+      validate_report_definitions(report, definition_ids)
+      report
+    end
+
+    def validate_report_definitions(report, ids)
+      Array(ids).map(&:to_s).uniq.each do |id|
+        item = report.fetch('references')[id.to_i]
+        definition = item && item[:definition]
+        valid = definition && definition.valid? && definition.object_id.to_s == id &&
+          item[:refs].values.all? do |ref|
+            entity = ref[:entity]
+            entity.valid? && entity.definition == definition &&
+              ref[:paths].all? { |path| path.all?(&:valid?) }
+          end
+        raise 'Состав выбранных моделей изменился. Запустите анализ повторно' unless valid
+      end
     end
 
     def add_rows_to_library(ids, scope)
       raise 'Облачная библиотека доступна только для чтения' unless Settings::SCOPES.include?(scope)
       count = actions_for(ids, catalogs: recognition_catalogs).add_to_library(ids, scope)
-      refresh("В #{scope == 'shared' ? 'общую' : 'личную'} библиотеку добавлено моделей: #{count}.")
+      invalidate_report("В #{scope == 'shared' ? 'общую' : 'личную'} библиотеку добавлено моделей: #{count}.", catalog_changed: true)
     end
 
     def rename_rows(ids, name, mode = 'selected')
+      if mode != 'selected'
+        current = report_for_rows(ids)
+        selected = current['models'].find { |row| row['id'] == Array(ids).first.to_s }
+        group = selected && current['duplicates'].find { |candidate| candidate['definitions'].any? { |item| selected['definition_ids'].include?(item['id']) } }
+        validate_report_definitions(current, group['definitions'].map { |item| item['id'] }) if group
+      end
       actual = actions_for(ids).rename_matches(ids, name, mode)
-      refresh("Модель переименована: #{actual}.#{mode == 'merge' ? ' Совпадения объединены; используйте Undo для отмены.' : ''}")
+      invalidate_report("Модель переименована: #{actual}.#{mode == 'merge' ? ' Совпадения объединены; используйте Undo для отмены.' : ''}")
     end
 
     def delete_rows(ids)
-      current = Analyzer.new(model).scan
+      current = report_for_rows(ids)
       count = current['models'].select { |row| Array(ids).include?(row['id']) }.sum { |row| row['instances'] }
       raise 'Выберите модели для удаления' if count.zero?
       removed = actions_for(ids).delete(ids)
       @selected_row_ids = []
-      refresh("Удалено объектов: #{removed}. Используйте Undo для отмены.")
+      invalidate_report("Удалено объектов: #{removed}. Используйте Undo для отмены.")
     end
 
     def move_rows(ids, section)
       raise ArgumentError, 'Сначала создайте раздел' unless @settings.sections.include?(section)
       count = actions_for(ids).move_to_section(ids, section)
-      refresh("В раздел «#{section}» добавлено определений: #{count}.")
+      invalidate_report("В раздел «#{section}» добавлено определений: #{count}.")
     end
 
     def replace_rows(ids, target_id)
@@ -626,14 +810,14 @@ module MafLibrary
       ensure
         model.abort_operation if catalog_target && !committed
       end
-      refresh("Затронуто размещений: #{result[:placements]}. Используйте Undo для отмены.")
+      invalidate_report("Затронуто размещений: #{result[:placements]}. Используйте Undo для отмены.")
     end
 
     def row_replacement_plan(ids, target_id, apply: false)
       raise 'Запустите анализ модели' unless @last_report && @last_model == model
       raise 'Отчет устарел после изменения модели. Запустите анализ повторно' if @report_stale
       ids = Array(ids).map(&:to_s)
-      current = Analyzer.new(model).scan
+      current = report_for_rows(ids)
       sources = ids.flat_map do |id|
         previous = @last_report['models'].find { |row| row['id'] == id }
         row = current['models'].find { |item| item['id'] == id }
@@ -652,6 +836,7 @@ module MafLibrary
                    temporary_catalog_preview(entry) { |definition| return [current, sources, definition, Replacement.new(model, current), Replacement.new(model, current).preview(sources, definition)] }
                  end
                else
+                 validate_report_definitions(current, [target_id])
                  current.fetch('references').fetch(target_id.to_i)[:definition]
                end
       replacement = Replacement.new(model, current)
@@ -677,9 +862,10 @@ module MafLibrary
       raise 'Отчет устарел после изменения модели. Запустите анализ повторно' if @report_stale
       old_group = @last_report['duplicates'].find { |group| group['id'] == group_id }
       raise 'Группа дублей больше не найдена. Запустите анализ повторно' unless old_group
-      current = Analyzer.new(model).scan
+      current = fresh_report
       group = current['duplicates'].find { |item| item['id'] == group_id }
       raise 'Состав дублей изменился. Запустите анализ повторно' unless group && group['definitions'] == old_group['definitions']
+      validate_report_definitions(current, group['definitions'].map { |item| item['id'] })
       raise 'Совпадение не подтверждено полным анализом. Замена недоступна' unless group['replaceable'] && old_group['replaceable']
       target_info = group['definitions'].find { |item| item['id'] == target_id }
       raise ArgumentError, 'Выберите эталон из этой группы дублей' unless target_info
@@ -828,7 +1014,7 @@ module MafLibrary
         CatalogSync.new(model: model, catalogs: recognition_catalogs).add_selected(
           definition: definition, scope: scope, name: name, category: category, copy_existing: copy_existing)
       end
-      refresh if @dialog && @dialog.visible? && !@panel_closed
+      invalidate_report(nil, catalog_changed: true) if @dialog && @dialog.visible? && !@panel_closed
       push(open_catalog_id: entry['id'], open_catalog_scope: scope,
         message: "Модель «#{entry['name']}» в библиотеке.", recognition_warnings: entry['recognition_warnings'])
       entry
@@ -837,7 +1023,7 @@ module MafLibrary
     def set_maf_decision(ids, decision)
       raise ArgumentError, 'Неизвестное решение' unless %w[confirmed rejected clear].include?(decision)
       raise 'Сначала выполните анализ модели' unless @last_report && @last_model == model
-      current = Analyzer.new(model).scan
+      current = report_for_rows(ids)
       keys = Array(ids).map(&:to_s).uniq
       raise ArgumentError, 'Выберите модели' if keys.empty?
       definitions = keys.flat_map do |id|
@@ -860,8 +1046,7 @@ module MafLibrary
           raise
         end
       end
-      @read_only_reconciliation = false
-      refresh
+      invalidate_report('Решение для МАФ сохранено. Запустите анализ для обновления отчёта.')
     end
 
     def update_catalog_version(id, requested_definition = nil, scope = nil)
@@ -900,7 +1085,7 @@ module MafLibrary
           raise
         end
       end
-      refresh if @dialog && @dialog.visible? && !@panel_closed
+      invalidate_report(nil, catalog_changed: true) if @dialog && @dialog.visible? && !@panel_closed
       updated
     end
 
@@ -957,7 +1142,7 @@ module MafLibrary
       end
       tool = ArrayTool.new(model, definition, mode, spacing_mm, surface_options) do |count|
         entry['scope'] == 'cloud' ? @settings.mark_cloud_used(id) : @catalogs.catalog(entry['scope']).mark_used(id)
-        refresh("Размещено моделей: #{count}. Операция поддерживает Undo.")
+        invalidate_report("Размещено моделей: #{count}. Операция поддерживает Undo.")
       end
       model.select_tool(tool)
       push(message: mode == 'line' ? 'Укажите начало и конец линии в SketchUp.' : 'Наведите курсор на грань и нажмите для размещения.')
@@ -968,9 +1153,10 @@ module MafLibrary
       raise 'Отчет устарел после изменения модели. Запустите анализ повторно' if @report_stale
       old_group = @last_report['duplicates'].find { |group| group['id'] == group_id }
       raise 'Группа дублей больше не найдена. Запустите анализ повторно' unless old_group
-      current_report = Analyzer.new(model).scan
+      current_report = fresh_report
       group = current_report['duplicates'].find { |item| item['id'] == group_id }
       raise 'Состав дублей изменился. Запустите анализ повторно' unless group && group['definitions'] == old_group['definitions']
+      validate_report_definitions(current_report, group['definitions'].map { |item| item['id'] })
       raise 'Совпадение не подтверждено полным анализом. Объединение недоступно' unless group['replaceable'] && old_group['replaceable']
       target_info = group['definitions'].find { |item| item['id'] == target_id }
       raise ArgumentError, 'Выберите эталон из этой группы дублей' unless target_info
@@ -983,7 +1169,7 @@ module MafLibrary
       preview = replacement.preview(sources, target)
       raise MafLibrary::Replacement::Blocked, preview[:blocked].map { |item| item[:reason] }.uniq.join('; ') unless preview[:blocked].empty?
       result = replacement.replace(sources, target)
-      refresh("Затронуто размещений: #{result[:placements]}. Используйте Undo для отмены.")
+      invalidate_report("Затронуто размещений: #{result[:placements]}. Используйте Undo для отмены.")
     end
 
     def replace_selected
@@ -1036,7 +1222,7 @@ module MafLibrary
       else
         replaced = operation.replace_instances(selected, target)[:entities]
       end
-      refresh("Заменено экземпляров: #{replaced}; затронуто размещений: #{preview[:placements]}. Используйте Undo для отмены.")
+      invalidate_report("Заменено экземпляров: #{replaced}; затронуто размещений: #{preview[:placements]}. Используйте Undo для отмены.")
     end
 
     def check_update

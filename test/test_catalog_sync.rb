@@ -367,3 +367,75 @@ class CatalogSyncTest
     assert_equal 2, Dir.glob(File.join(catalog.root, 'models', '*.skp')).length
   end
 end
+
+class CatalogSyncTest
+  def test_large_confirmed_model_sync_reuses_metadata_without_more_geometry_reads
+    entities = Class.new(Array) do
+      attr_accessor :reads
+
+      def [](index)
+        self.reads = reads.to_i + 1
+        super
+      end
+
+      def each
+        return enum_for(:each) unless block_given?
+        super do |entity|
+          self.reads = reads.to_i + 1
+          yield entity
+        end
+      end
+    end.new(Array.new(5_000) { FakeEdge.new } + [Sketchup::Face.new])
+    material = Struct.new(:name, :texture, :alpha).new('Timber', nil, 1)
+    entities.first.define_singleton_method(:material) { material }
+    entities.last.define_singleton_method(:back_material) { material }
+    @definition.entities = entities
+    length = Struct.new(:millimeters) do
+      def to_f; millimeters / 25.4; end
+      def to_mm; millimeters; end
+    end
+    bounds = Struct.new(:width, :height, :depth, :min, :max).new(
+      length.new(1500.06), length.new(500.04), length.new(700.05),
+      FakePoint.new(0, 0, 0), FakePoint.new(1500.06 / 25.4, 500.04 / 25.4, 700.05 / 25.4))
+    @definition.define_singleton_method(:bounds) { bounds }
+    @model = FakeModel.new(Array.new(2) { Sketchup::ComponentInstance.new(@definition) })
+    current = report
+    entities.reads = 0
+    session = syncer.start_sync(current)
+
+    assert session.step(max_definitions: 1)
+    assert_empty session.result[:errors]
+    assert_equal 0, entities.reads, 'Automatic card creation must not traverse the recognized geometry again'
+    entry = @catalogs.entries.fetch(0)
+    assert_equal [1500.1, 500.0, 700.1], entry['bbox_mm']
+    assert_equal 1, entry['faces_count']
+    assert_equal 5_000, entry['edges_count']
+    assert_equal 1, entry['materials_count']
+    refute entry.key?('behavior_flags')
+    assert_equal({"personal:#{entry['id']}" => 2}, current['catalog_placements'])
+  end
+
+  def test_incremental_sync_processes_one_definition_per_step
+    second = FakeDefinition.new('Second', [FakeEdge.new], {['MafLibrary', 'maf_decision'] => 'confirmed'})
+    second.entities.first.end.position.x = 2
+    third = FakeDefinition.new('Third', [FakeEdge.new], {['MafLibrary', 'maf_decision'] => 'confirmed'})
+    third.entities.first.end.position.x = 3
+    @model = FakeModel.new([
+      Sketchup::ComponentInstance.new(@definition),
+      Sketchup::ComponentInstance.new(second),
+      Sketchup::ComponentInstance.new(third)
+    ])
+    current = report
+    session = syncer.start_sync(current)
+
+    refute session.step(max_definitions: 1)
+    assert_equal 1, @catalogs.entries.length
+    assert_nil session.result
+    refute session.step(max_definitions: 1)
+    assert_equal 2, @catalogs.entries.length
+    assert session.step(max_definitions: 1)
+    assert session.done?
+    assert_equal 3, session.result[:created]
+    assert_equal 3, current['catalog_placements'].values.sum
+  end
+end

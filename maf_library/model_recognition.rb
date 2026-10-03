@@ -15,52 +15,262 @@ module MafLibrary
     end
 
     def apply
-      fingerprint_reader = DefinitionSignature.new(mode: :catalog)
-      @geometry_cache = {}
-      rows = Array(@report['models'])
-      @evidence = {}
-      rows.each do |row|
-        item = reference_for(row)
-        definition = item && item[:definition]
-        refs = item ? item[:refs].values.map { |ref| ref[:entity] } : []
-        result = definition ? fingerprint_reader.call(definition) : {}
-        row['recognition_fingerprint'] = result[:digest]
-        row['recognition_complete'] = result[:complete] == true && result[:sampled] != true
-        row['recognition_sampled'] = result[:sampled] == true
-        row['names'] ||= definition ? ([definition.name.to_s] + refs.map { |ref| ref.name.to_s }).uniq : [row['name']]
-        row['tags'] ||= []
-        row['metadata'] = parameters(definition, refs)
-        row['tags'] = (Array(row['tags']) + Array(row['metadata']['extension_attributes']['tags'])).map(&:to_s).uniq
-        row['recognition_warnings'] = []
-        row['recognized_catalog'] = false
-        row['recognized_catalog_scope'] = nil
-        @evidence[row.object_id] = rules_for(row)
+      session = start_apply
+      session.step(max_rows: 1000) until session.done?
+      session.result
+    end
+
+    # A session has no timer or background work of its own. The caller may
+    # discard it between steps to stop scanning without touching more geometry.
+    def start_apply
+      session = self.class.new(@report, catalog_entries: @entries)
+      session.send(:prepare_session)
+      session
+    end
+
+    def step(max_rows: 10, max_entities: 100, deadline: nil)
+      raise ArgumentError, 'max_rows must be positive' unless max_rows.to_i > 0
+      raise ArgumentError, 'max_entities must be positive' unless max_entities.to_i > 0
+      raise 'start_apply must be called first' unless @phase
+      processed = 0
+      budget = max_entities.to_i
+      while processed < max_rows && !done?
+        break if deadline && Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        case @phase
+        when :enrich
+          if @row_index >= @rows.length
+            @phase = :classify
+            @row_index = 0
+            next
+          end
+          return false unless budget.positive?
+          completed, used = enrich_row(@rows[@row_index], max_entities: budget, deadline: deadline)
+          budget -= used
+          return false unless completed
+          @row_index += 1
+        when :classify
+          if @row_index >= @rows.length
+            @phase = :hierarchy
+            next
+          end
+          classify(@rows[@row_index], @confirmed_fingerprints)
+          @row_index += 1
+        when :hierarchy
+          if @hierarchy_stack.empty?
+            if @hierarchy_root_index >= @hierarchy_roots.length
+              @phase = :counts
+              @row_index = 0
+              next
+            end
+            @hierarchy_stack << [@hierarchy_roots[@hierarchy_root_index], false]
+            @hierarchy_root_index += 1
+          end
+          node, expanded = @hierarchy_stack.pop
+          if expanded
+            annotate_node(node)
+          else
+            @hierarchy_stack << [node, true]
+            Array(node['children']).reverse_each { |child| @hierarchy_stack << [child, false] }
+          end
+        when :counts
+          if @row_index >= @rows.length
+            finish_counts
+            @phase = :done
+            next
+          end
+          count_row(@rows[@row_index])
+          @row_index += 1
+        end
+        processed += 1
       end
-      # Manual confirmations also recognize independent copies in the project.
-      confirmed_fingerprints = rows.select do |row|
-        row['maf_decision'] == 'confirmed' && row['recognition_complete'] && row['recognition_fingerprint']
-      end.map { |row| row['recognition_fingerprint'] }
-      rows.each { |row| classify(row, confirmed_fingerprints) }
-      rows_by_definition = rows.each_with_object({}) do |row, mapping|
-        Array(row['definition_ids']).each { |id| mapping[id.to_s] = row }
-      end
-      annotate_hierarchy(Array(@report['hierarchy']), rows_by_definition)
-      update_counts(rows)
-      @report
+      done?
+    end
+
+    def done?
+      @phase == :done
+    end
+
+    def result
+      @report if done?
     end
 
     private
 
-    def annotate_hierarchy(nodes, rows)
-      nodes.each do |node|
-        row = rows[node['definition_id']]
-        node['is_maf'] = !row.nil? && row['is_maf'] == true
-        actionable = row && (node['kind'] != 'group' || node['is_maf'])
-        node['row_id'] = actionable ? row['id'] : nil
-        annotate_hierarchy(Array(node['children']), rows)
-        node['has_maf_descendant'] = Array(node['children']).any? do |child|
-          child['is_maf'] == true || child['has_maf_descendant'] == true
+    def prepare_session
+      @fingerprint_reader = DefinitionSignature.new(mode: :catalog)
+      @geometry_cache = {}
+      @evidence = {}
+      @confirmed_fingerprints = {}
+      @rows_by_definition = {}
+      @rows = Array(@report['models'])
+      @hierarchy_roots = Array(@report['hierarchy'])
+      @hierarchy_root_index = 0
+      @hierarchy_stack = []
+      @row_index = 0
+      @counts = {'all_component_instances' => 0, 'all_component_definitions' => 0,
+                 'maf_instances' => 0, 'maf_definitions' => 0}
+      @placements = {}
+      @phase = :enrich
+    end
+
+    def enrich_row(row, max_entities:, deadline:)
+      item = reference_for(row)
+      definition = item && item[:definition]
+      @enrichment_refs ||= item ? item[:refs].values.map { |ref| ref[:entity] } : []
+      refs = @enrichment_refs
+      used = 0
+      unless @row_signature
+        if definition
+          @row_signature_session ||= @fingerprint_reader.start_call(definition)
+          completed = @row_signature_session.step(max_entities: max_entities, deadline: deadline)
+          used += @row_signature_session.processed
+          return [false, used] unless completed
+          @row_signature = @row_signature_session.result
+          @row_signature_session = nil
+        else
+          @row_signature = {}
         end
+      end
+      @parameter_session ||= GeometrySession.new(self, definition, refs)
+      return [false, used] unless max_entities > used
+      completed = @parameter_session.step(max_entities: max_entities - used, deadline: deadline)
+      used += @parameter_session.processed
+      return [false, used] unless completed
+      signature = @row_signature
+      row['recognition_fingerprint'] = signature[:digest]
+      row['recognition_complete'] = signature[:complete] == true && signature[:sampled] != true
+      row['recognition_sampled'] = signature[:sampled] == true
+      row['names'] ||= definition ? ([definition.name.to_s] + refs.map { |ref| ref.name.to_s }).uniq : [row['name']]
+      row['tags'] ||= []
+      row['metadata'] = @parameter_session.result
+      row['tags'] = (Array(row['tags']) + Array(row['metadata']['extension_attributes']['tags'])).map(&:to_s).uniq
+      row['recognition_warnings'] = []
+      row['recognized_catalog'] = false
+      row['recognized_catalog_scope'] = nil
+      @evidence[row.object_id] = rules_for(row)
+      # Manual confirmations also recognize independent copies in the project.
+      if row['maf_decision'] == 'confirmed' && row['recognition_complete'] && row['recognition_fingerprint']
+        @confirmed_fingerprints[row['recognition_fingerprint']] = true
+      end
+      Array(row['definition_ids']).each { |id| @rows_by_definition[id.to_s] = row }
+      @row_signature = @parameter_session = @enrichment_refs = nil
+      [true, used]
+    end
+
+    # Cache each definition's physical geometry, but aggregate every placement.
+    # Both operations advance in frames so a large row can yield mid-definition.
+    class GeometrySession
+      attr_reader :result, :processed
+
+      def initialize(owner, definition, refs)
+        @owner, @definition, @refs = owner, definition, refs
+        @flags = {'glued' => false, 'cuts_opening' => false, 'dynamic' => false, 'axes_known' => true}
+        @metadata = {'bbox_mm' => [], 'faces_count' => 0, 'edges_count' => 0,
+          'materials_count' => 0, 'nesting_depth' => 0, 'behavior_flags' => @flags, 'extension_attributes' => {}}
+        @materials = {}
+        @frames = []
+        @active = {}
+        if definition
+          if definition.respond_to?(:get_attribute)
+            %w[maf_decision category tags catalog_id catalog_scope catalog_version source_sha recognition_fingerprint].each do |key|
+              value = definition.get_attribute(DICTIONARY, key)
+              @metadata['extension_attributes'][key] = value unless value.nil?
+            end
+          end
+          push_frame(definition, 0)
+        end
+      rescue StandardError
+        @flags['axes_known'] = false
+        @result = @metadata
+      end
+
+      def step(max_entities:, deadline: nil)
+        @processed = 0
+        return true if @result
+        while @processed < max_entities
+          break if deadline && Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+          if @frames.empty?
+            finish
+            return true
+          end
+          frame = @frames.last
+          definition = frame[:definition]
+          geometry = cache[definition.object_id]
+          if !geometry
+            local = frame[:local]
+            entities = definition.entities
+            if frame[:entity_index] < entities.length
+              entity = entities[frame[:entity_index]]
+              frame[:entity_index] += 1
+              @owner.__send__(:add_materials, entity, local[:materials])
+              local[:faces] += 1 if entity.is_a?(Sketchup::Face)
+              local[:edges] += 1 if entity.is_a?(Sketchup::Edge)
+              local[:children] << entity if entity.is_a?(Sketchup::ComponentInstance) || entity.is_a?(Sketchup::Group)
+              @processed += 1
+              next
+            end
+            geometry = cache[definition.object_id] = local
+          end
+          unless frame[:aggregated]
+            @metadata['nesting_depth'] = [@metadata['nesting_depth'], frame[:depth]].max
+            @materials.merge!(geometry[:materials])
+            @metadata['faces_count'] += geometry[:faces]
+            @metadata['edges_count'] += geometry[:edges]
+            frame[:aggregated] = true
+            @processed += 1
+            next
+          end
+          if frame[:child_index] < geometry[:children].length
+            child = geometry[:children][frame[:child_index]]
+            frame[:child_index] += 1
+            @owner.__send__(:collect_flags, child.definition, [child], @flags)
+            push_frame(child.definition, frame[:depth] + 1) unless @active[child.definition.object_id]
+          else
+            @active.delete(definition.object_id)
+            @frames.pop
+          end
+          @processed += 1
+        end
+        false
+      rescue StandardError
+        @flags['axes_known'] = false
+        @result = @metadata
+        true
+      end
+
+      private
+
+      def cache
+        @owner.instance_variable_get(:@geometry_cache)
+      end
+
+      def push_frame(definition, depth)
+        local = {faces: 0, edges: 0, materials: {}, children: []}
+        @owner.__send__(:add_materials, definition, local[:materials]) unless cache.key?(definition.object_id)
+        @active[definition.object_id] = true
+        @frames << {definition: definition, depth: depth, local: local, entity_index: 0, child_index: 0}
+      end
+
+      def finish
+        if @definition
+          @metadata['materials_count'] = @materials.length
+          @owner.__send__(:collect_flags, @definition, @refs, @flags)
+          if @definition.respond_to?(:bounds)
+            bounds = @definition.bounds
+            @metadata['bbox_mm'] = [bounds.width, bounds.height, bounds.depth].map { |dimension| dimension.to_f * 25.4 }
+          end
+        end
+        @result = @metadata
+      end
+    end
+
+    def annotate_node(node)
+      row = @rows_by_definition[node['definition_id']]
+      node['is_maf'] = !row.nil? && row['is_maf'] == true
+      actionable = row && (node['kind'] != 'group' || node['is_maf'])
+      node['row_id'] = actionable ? row['id'] : nil
+      node['has_maf_descendant'] = Array(node['children']).any? do |child|
+        child['is_maf'] == true || child['has_maf_descendant'] == true
       end
     end
 
@@ -160,19 +370,23 @@ module MafLibrary
       end
     end
 
-    def update_counts(rows)
-      components = rows.select { |row| row['kind'] == 'component' }
-      maf = rows.select { |row| row['is_maf'] == true }
-      summary = (@report['summary'] ||= {})
-      summary['all_component_instances'] = components.sum { |row| row['instances'].to_i }
-      summary['all_component_definitions'] = components.sum { |row| row['definitions'].to_i }
-      summary['maf_instances'] = maf.sum { |row| row['instances'].to_i }
-      summary['maf_definitions'] = maf.sum { |row| row['definitions'].to_i }
-      @report['catalog_placements'] = maf.each_with_object({}) do |row, counts|
-        next unless row['recognized_catalog']
-        key = "#{row['recognized_catalog_scope']}:#{row['catalog_id']}"
-        counts[key] = counts.fetch(key, 0) + row['instances'].to_i
+    def count_row(row)
+      if row['kind'] == 'component'
+        @counts['all_component_instances'] += row['instances'].to_i
+        @counts['all_component_definitions'] += row['definitions'].to_i
       end
+      return unless row['is_maf'] == true
+      @counts['maf_instances'] += row['instances'].to_i
+      @counts['maf_definitions'] += row['definitions'].to_i
+      return unless row['recognized_catalog']
+      key = "#{row['recognized_catalog_scope']}:#{row['catalog_id']}"
+      @placements[key] = @placements.fetch(key, 0) + row['instances'].to_i
+    end
+
+    def finish_counts
+      summary = (@report['summary'] ||= {})
+      @counts.each { |key, value| summary[key] = value }
+      @report['catalog_placements'] = @placements
     end
 
     def parameters(definition, refs)

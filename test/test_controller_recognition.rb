@@ -35,6 +35,9 @@ module UI
     def inputbox(*_args)
       input_answer
     end
+    def select_directory(**_options)
+      nil
+    end
   end
 end
 
@@ -92,16 +95,156 @@ class SerializedControllerDefinitions < Array
 end
 
 class ControllerRecognitionTest < Minitest::Test
+  def test_changing_library_path_during_card_build_cancels_scan_without_old_cards_or_restart
+    @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
+    ready
+    original = report
+    @dialog.callbacks.fetch('scan').call(nil)
+    1000.times do
+      break if @controller.instance_variable_get(:@scan_job)[:phase] == :cards
+      run_timer
+    end
+    assert_equal :cards, @controller.instance_variable_get(:@scan_job)[:phase]
+    queued = UI.timers.values.first.last
+    publications = @dialog.payloads.count { |payload| payload.key?('data') }
+    new_root = File.join(@dir, 'replacement-personal')
+    FileUtils.mkdir_p(new_root)
+
+    MafLibrary::Analyzer.stub(:new, ->(*) { flunk 'Catalog mutation restarted model analysis' }) do
+      UI.stub(:select_directory, new_root) { @controller.send(:choose_library_path, 'personal') }
+      assert @controller.instance_variable_get(:@scan_job).nil?, 'Catalog mutation must cancel the active scan'
+      assert_empty UI.timers
+      queued.call
+    end
+
+    assert_same original, report
+    assert @controller.instance_variable_get(:@report_stale)
+    assert_equal 'idle', scan_state
+    assert_equal publications, @dialog.payloads.count { |payload| payload.key?('data') }
+    assert_empty cards
+    assert_empty @catalogs.entries
+    assert_equal File.realpath(new_root), @dialog.payloads.last.dig('catalog_update', 'settings', 'personal')
+  end
+
+  def test_changing_cloud_source_during_scan_cancels_old_snapshot_without_restart
+    old_url, new_url = 'https://example.test/old.json', 'https://example.test/new.json'
+    digest = MafLibrary::DefinitionSignature.new(mode: :catalog).call(@definition)[:digest]
+    entry = {'id' => 'old-cloud', 'scope' => 'cloud', 'maf_confirmed' => true,
+      'recognition_fingerprint' => digest, 'version' => 1, 'sha256' => 'remote-sha'}
+    sources = {old_url => Struct.new(:entries).new([entry]),
+      new_url => Struct.new(:entries).new([entry.merge('id' => 'new-cloud')])}
+    @settings.set_cloud_url(old_url)
+    @controller.define_singleton_method(:cloud) { sources.fetch(@settings.cloud_url) }
+    ready
+    original = report
+    assert_equal ['old-cloud'], cards.map { |card| card['id'] }
+    @dialog.callbacks.fetch('scan').call(nil)
+    1000.times do
+      break if @controller.instance_variable_get(:@scan_job)[:phase] == :cards
+      run_timer
+    end
+    assert_equal :cards, @controller.instance_variable_get(:@scan_job)[:phase]
+    queued = UI.timers.values.first.last
+    publications = @dialog.payloads.count { |payload| payload.key?('data') }
+
+    MafLibrary::Analyzer.stub(:new, ->(*) { flunk 'Cloud mutation restarted model analysis' }) do
+      @dialog.callbacks.fetch('set_cloud_url').call(nil, new_url)
+      assert @controller.instance_variable_get(:@scan_job).nil?, 'Cloud mutation must cancel the active scan'
+      assert_empty UI.timers
+      queued.call
+    end
+
+    assert_same original, report
+    assert @controller.instance_variable_get(:@report_stale)
+    assert_equal 'idle', scan_state
+    assert_equal publications, @dialog.payloads.count { |payload| payload.key?('data') }
+    assert_equal ['new-cloud'], cards.map { |card| card['id'] }
+    assert_nil cards.first['project_placements']
+    assert_equal new_url, @dialog.payloads.last.dig('catalog_update', 'settings', 'cloud_url')
+  end
+
+  def test_reopening_panel_in_different_model_clears_previous_undo_reconciliation
+    ready
+    @controller.report_stale(@model, read_only: true)
+    @controller.send(:panel_closed)
+    definition = FakeDefinition.new('New bench', [FakeEdge.new], {['MafLibrary', 'maf_decision'] => 'confirmed'})
+    definition.entities.first.end.position.x = 25
+    Sketchup.active_model = RecognitionControllerModel.new([Sketchup::ComponentInstance.new(definition)])
+    @controller.send(:panel_ready)
+    analyze
+    refute @controller.instance_variable_get(:@read_only_reconciliation)
+    refute_nil definition.get_attribute('MafLibrary', 'catalog_id')
+  end
+
+  def test_row_actions_use_completed_report_and_reject_stale_without_analysis
+    ready
+    id = report['models'].first['id']
+    MafLibrary::Analyzer.stub(:new, ->(*) { flunk 'Row action started model-wide analysis' }) do
+      @controller.send(:rename_rows, [id], 'Renamed')
+      assert_equal 'Renamed', @definition.name
+      assert_raises(StandardError) { @controller.send(:set_maf_decision, [id], 'confirmed') }
+      assert_raises(StandardError) { @controller.send(:delete_rows, [id]) }
+    end
+    analyze
+    MafLibrary::Analyzer.stub(:new, ->(*) { flunk 'MAF decision started model-wide analysis' }) do
+      @controller.send(:set_maf_decision, [id], 'confirmed')
+      assert_equal 'confirmed', @definition.get_attribute('MafLibrary', 'maf_decision')
+    end
+  end
+
+  def test_stop_during_geometry_enrichment_keeps_previous_report_and_stops_reads
+    ready
+    original = report
+    entities = Class.new(Array) do
+      attr_accessor :reads
+      def [](index)
+        self.reads = reads.to_i + 1
+        super
+      end
+    end.new(Array.new(500) { FakeEdge.new })
+    @definition.entities = entities
+    @model.emit(:onTransactionCommit)
+    @dialog.callbacks.fetch('scan').call(nil)
+    100.times do
+      break if @controller.instance_variable_get(:@scan_job)[:phase] == :recognize
+      run_timer
+    end
+    assert_equal :recognize, @controller.instance_variable_get(:@scan_job)[:phase]
+    run_timer
+    assert_equal :recognize, @controller.instance_variable_get(:@scan_job)[:phase]
+    queued = UI.timers.values.first.last
+    @dialog.callbacks.fetch('cancel_scan').call(nil)
+    stopped_reads = entities.reads
+    queued.call
+    assert_equal stopped_reads, entities.reads
+    assert_same original, report
+    assert @controller.instance_variable_get(:@report_stale)
+    assert_empty UI.timers
+  end
+
+  def test_local_reference_validation_rejects_changed_definition_without_analysis
+    ready
+    id = report['models'].first['id']
+    @instance.definition = FakeDefinition.new('Unexpected replacement', [FakeEdge.new])
+    MafLibrary::Analyzer.stub(:new, ->(*) { flunk 'Reference validation started analysis' }) do
+      assert_raises(StandardError) { @controller.send(:rename_rows, [id], 'Wrong') }
+      assert_raises(StandardError) { @controller.send(:set_maf_decision, [id], 'confirmed') }
+    end
+    assert_equal 'Bench', @definition.name
+    assert_nil @definition.get_attribute('MafLibrary', 'maf_decision')
+  end
+
   def test_version_callback_resolves_scope_when_personal_and_shared_ids_collide
     select
     entry = @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
     FileUtils.cp_r(@catalogs.catalog('personal').root, @catalogs.catalog('shared').root)
     callback = @dialog.callbacks.fetch('update_catalog_version')
+    analyze
     callback.call(nil, entry['id'], @definition.object_id.to_s, 'personal')
     assert_equal 2, @catalogs.catalog('personal').find(entry['id'])['version']
     assert_equal 1, @catalogs.catalog('shared').find(entry['id'])['version']
     @definition.set_attribute('MafLibrary', 'catalog_scope', 'shared')
-    @controller.send(:refresh)
+    analyze
     callback.call(nil, entry['id'], @definition.object_id.to_s, 'shared')
     assert_equal 2, @catalogs.catalog('shared').find(entry['id'])['version']
     assert_equal 2, @catalogs.catalog('personal').find(entry['id'])['version']
@@ -142,7 +285,13 @@ class ControllerRecognitionTest < Minitest::Test
 
   def ready
     @controller.send(:panel_ready)
-    run_timer
+    analyze
+  end
+
+  def analyze
+    callback = @dialog.callbacks.fetch('scan')
+    callback.call(nil)
+    drain_scan_timers
   end
 
   def run_timer
@@ -152,8 +301,22 @@ class ControllerRecognitionTest < Minitest::Test
     timer.last.call
   end
 
+  def drain_scan_timers
+    1000.times do
+      id, timer = UI.timers.first
+      break unless timer
+      UI.timers.delete(id)
+      timer.last.call
+    end
+    assert_empty UI.timers, 'analysis did not finish within 1000 timer steps'
+  end
+
   def report
     @controller.instance_variable_get(:@last_report)
+  end
+
+  def scan_state
+    @dialog.payloads.reverse_each.find { |payload| payload.key?('scan_state') }&.fetch('scan_state')
   end
 
   def cards
@@ -174,30 +337,93 @@ class ControllerRecognitionTest < Minitest::Test
     @model.selection.add(entity)
   end
 
-  def test_opening_panel_defers_analysis_until_after_ready_callback
-    @controller.send(:panel_ready)
+  def test_opening_panel_does_not_analyze_without_button_callback
+    @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
+    MafLibrary::Analyzer.stub(:new, ->(*) { flunk 'opening the panel must not create a model analyzer' }) do
+      @controller.send(:panel_ready)
+    end
 
     assert_nil report
-    assert_equal [0.5], UI.timers.values.map(&:first)
+    assert_empty @catalogs.entries
+    assert_nil @definition.get_attribute('MafLibrary', 'catalog_id')
+    assert_empty UI.timers
 
-    run_timer
+    analyze
     refute_nil report
+    assert_equal 1, @catalogs.entries.length
     assert_empty UI.timers
   end
 
-  def test_open_and_transaction_burst_coalesce_without_synchronous_scan
+  def test_scan_button_starts_scheduled_analysis_and_reports_completion
+    @controller.send(:panel_ready)
+
+    @dialog.callbacks.fetch('scan').call(nil)
+
+    assert_equal 'running', scan_state
+    assert_equal 1, UI.timers.length
+    assert_nil report
+
+    drain_scan_timers
+    refute_nil report
+    assert_equal 'idle', scan_state
+  end
+
+  def test_stop_button_cancels_queued_analysis_without_publishing_report
+    @controller.send(:panel_ready)
+    @dialog.callbacks.fetch('scan').call(nil)
+    assert_equal 1, UI.timers.length
+    queued_timer = UI.timers.values.first.last
+
+    @dialog.callbacks.fetch('cancel_scan').call(nil)
+
+    assert_nil report
+    assert @controller.instance_variable_get(:@report_stale)
+    assert_empty UI.timers
+    assert_equal 'idle', scan_state
+    queued_timer.call
+    assert_nil report
+    assert_empty UI.timers
+  end
+
+  def test_entering_component_cancels_active_analysis
+    @controller.send(:panel_ready)
+    @dialog.callbacks.fetch('scan').call(nil)
+    assert_equal 'running', scan_state
+
+    @model.emit(:onActivePathChanged)
+
+    assert_nil report
+    assert @controller.instance_variable_get(:@report_stale)
+    assert_empty UI.timers
+    assert_equal 'idle', scan_state
+  end
+
+  def test_opening_panel_loads_library_cards_without_model_analysis
+    @catalogs.catalog('personal').add_definition(@definition, category: 'Seats')
+
+    @controller.send(:panel_ready)
+
+    assert_equal 1, cards.length
+    assert_equal 'Bench', cards.first['name']
+    assert_nil cards.first['project_placements']
+    assert_nil report
+    assert_empty UI.timers
+  end
+
+  def test_transaction_burst_waits_for_explicit_scan
     ready
     refute_nil report
     original = report
     3.times { @model.emit(:onTransactionCommit) }
     assert_same original, report
-    assert_equal [0.5], UI.timers.values.map(&:first)
-    run_timer
+    assert_empty UI.timers
+    assert @controller.instance_variable_get(:@report_stale)
+    analyze
     refute_same original, report
     assert_empty UI.timers
   end
 
-  def test_transaction_burst_performs_no_catalog_io_before_timer
+  def test_transaction_burst_performs_no_catalog_io_before_manual_scan
     select
     @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
     ready
@@ -211,22 +437,22 @@ class ControllerRecognitionTest < Minitest::Test
         assert_equal 0, thumbnail_reads
         assert_equal({'report_stale' => true}, @dialog.payloads.last)
         assert_nil cards.first['project_placements']
-        assert_equal [0.5], UI.timers.values.map(&:first)
-        run_timer
+        assert_empty UI.timers
+        analyze
         assert_operator manifest_reads, :>, 0
         assert_operator thumbnail_reads, :>, 0
       end
     end
   end
 
-  def test_catalog_read_failure_is_deferred_until_queued_refresh
+  def test_catalog_read_failure_is_deferred_until_manual_scan
     ready
     reads = 0
     @catalogs.stub(:entries, -> { reads += 1; raise IOError, 'catalog unavailable' }) do
       capture_io { 3.times { @model.emit(:onTransactionCommit) } }
-      assert_equal 1, UI.timers.length
+      assert_empty UI.timers
       assert_equal 0, reads
-      capture_io { run_timer }
+      capture_io { analyze }
       assert_equal 1, reads
       assert @dialog.payloads.last['error']
       assert @controller.instance_variable_get(:@report_stale)
@@ -234,14 +460,14 @@ class ControllerRecognitionTest < Minitest::Test
     end
   end
 
-  def test_stale_publication_failure_cannot_prevent_refresh_timer
+  def test_stale_publication_failure_does_not_trigger_analysis
     ready
     @dialog.stub(:execute_script, ->(*) { raise IOError, 'panel unavailable' }) do
       capture_io { 3.times { @model.emit(:onTransactionCommit) } }
     end
-    assert_equal [0.5], UI.timers.values.map(&:first)
+    assert_empty UI.timers
     assert @controller.instance_variable_get(:@report_stale)
-    run_timer
+    analyze
     refute @controller.instance_variable_get(:@report_stale)
   end
 
@@ -340,7 +566,7 @@ class ControllerRecognitionTest < Minitest::Test
     assert_loaded_metadata(entry, array_definition)
   end
 
-  def test_undo_redo_recompute_counts_and_keep_zero_placement_card
+  def test_undo_redo_counts_remain_unset_until_manual_scan
     select
     @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
     ready
@@ -348,11 +574,14 @@ class ControllerRecognitionTest < Minitest::Test
     @model.entities.clear
     @model.emit(:onTransactionUndo)
     assert_nil cards.first['project_placements']
-    run_timer
+    assert_empty UI.timers
+    analyze
     assert_equal 0, cards.first['project_placements']
     @model.entities << @instance
     @model.emit(:onTransactionRedo)
-    run_timer
+    assert_nil cards.first['project_placements']
+    assert_empty UI.timers
+    analyze
     assert_equal 1, cards.first['project_placements']
   end
 
@@ -365,48 +594,48 @@ class ControllerRecognitionTest < Minitest::Test
     assert_equal 2, calls
     assert_equal 1, @catalogs.entries.length
     assert_empty UI.timers
-    MafLibrary::Analyzer.stub(:new, factory) { @controller.send(:refresh) }
+    MafLibrary::Analyzer.stub(:new, factory) { analyze }
     assert_equal 3, calls, 'unchanged linked count must not force rescan'
     assert_empty UI.timers
   end
 
-  def test_real_edit_during_refresh_is_deferred_and_guard_blocks_reentrancy
+  def test_real_edit_during_scan_marks_report_stale_without_rescan
     ready
     calls = 0
     original = MafLibrary::Analyzer.method(:new)
     factory = lambda do |model|
       calls += 1
-      if calls == 1
-        @model.emit(:onTransactionCommit)
-        @controller.send(:refresh)
-      end
       original.call(model)
     end
-    MafLibrary::Analyzer.stub(:new, factory) { @controller.send(:refresh) }
+    MafLibrary::Analyzer.stub(:new, factory) do
+      @controller.send(:start_scan)
+      @model.emit(:onTransactionCommit)
+    end
     assert_equal 1, calls
     assert @controller.instance_variable_get(:@report_stale)
-    assert_equal 1, UI.timers.length
-    run_timer
+    assert_empty UI.timers
+    analyze
     refute @controller.instance_variable_get(:@report_stale)
   end
 
   def test_failed_scan_releases_guard_for_retry
     ready
     MafLibrary::Analyzer.stub(:new, ->(*) { raise IOError, 'scan failed' }) do
-      assert_raises(IOError) { @controller.send(:refresh) }
+      capture_io { analyze }
+      assert @dialog.payloads.last['error']
     end
     refute @controller.instance_variable_get(:@refreshing)
-    @controller.send(:refresh)
+    analyze
     refute @controller.instance_variable_get(:@report_stale)
   end
 
-  def test_close_cancels_refresh_and_selection_timers_and_reopen_scans
+  def test_close_cancels_selection_timer_and_reopen_waits_for_scan
     ready
     assert_includes Sketchup.app_observers, @controller.instance_variable_get(:@app_observer)
     @model.emit(:onTransactionCommit)
     @controller.selection_changed
     queued = UI.timers.values.map(&:last)
-    assert_equal [0, 0.5], UI.timers.values.map(&:first).sort
+    assert_equal [0], UI.timers.values.map(&:first)
     @controller.send(:panel_closed)
     assert_empty UI.timers
     assert_empty @model.observers
@@ -414,19 +643,21 @@ class ControllerRecognitionTest < Minitest::Test
     old_report = report
     queued.each(&:call)
     assert_same old_report, report
-    ready
+    @controller.send(:panel_ready)
+    assert_nil report
+    assert_empty UI.timers
+    analyze
     refute_same old_report, report
     assert_equal 1, @model.observers.length
   end
 
-  def test_refresh_timer_callback_is_consumed_once_even_if_host_repeats_it
+  def test_transaction_after_scan_never_queues_refresh_timer
     ready
-    @controller.report_stale
-    callback = UI.timers.values.first.last
-    run_timer
     original = report
-    callback.call
+    @controller.report_stale
+    assert_empty UI.timers
     assert_same original, report
+    assert @controller.instance_variable_get(:@report_stale)
   end
 
   def test_loaded_catalog_definition_stamps_scope_and_fingerprint
@@ -440,22 +671,28 @@ class ControllerRecognitionTest < Minitest::Test
   def test_model_change_during_scan_cannot_save_old_model_to_library
     @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
     analyzer = MafLibrary::Analyzer.new(@model)
-    original_scan = analyzer.method(:scan)
+    session = analyzer.start_scan
+    original_step = session.method(:step)
     controller = @controller
-    analyzer.define_singleton_method(:scan) do
-      result = original_scan.call
-      Sketchup.active_model = RecognitionControllerModel.new([])
-      controller.model_changed(Sketchup.active_model)
-      result
+    session.define_singleton_method(:step) do |**options|
+      done = original_step.call(**options)
+      if done && !@changed_model
+        @changed_model = true
+        Sketchup.active_model = RecognitionControllerModel.new([])
+        controller.model_changed(Sketchup.active_model)
+      end
+      done
     end
+    analyzer.define_singleton_method(:start_scan) { session }
     MafLibrary::Analyzer.stub(:new, analyzer) { ready }
     assert_empty @catalogs.entries
     assert_nil report
-    run_timer
+    assert_empty UI.timers
+    analyze
     assert_empty report['models']
   end
 
-  def test_incomplete_confirmation_recovers_link_after_undo_on_next_timer
+  def test_incomplete_confirmation_recovers_link_only_after_manual_scan
     @definition.entities << Object.new
     @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
     ready
@@ -464,29 +701,28 @@ class ControllerRecognitionTest < Minitest::Test
       @definition.set_attribute('MafLibrary', key, nil)
     end
     @model.emit(:onTransactionUndo)
-    run_timer
+    assert_empty UI.timers
+    analyze
     assert_nil @definition.get_attribute('MafLibrary', 'catalog_id'), 'Undo refresh must preserve Redo'
     assert_equal entry['id'], report['models'].first['catalog_id']
     assert_equal 1, cards.first['project_placements']
     assert_equal 1, @catalogs.entries.length
   end
 
-  def test_windows_and_mac_model_transitions_invalidate_counts_and_old_timer
+  def test_windows_and_mac_model_transitions_invalidate_counts_without_scan
     select
     @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
     ready
     [:onNewModel, :onOpenModel, :onActivateModel].each do |event|
       @controller.report_stale
-      old_timer = UI.timers.values.first.last
       old_model = Sketchup.active_model
       Sketchup.active_model = RecognitionControllerModel.new([])
       @controller.instance_variable_get(:@app_observer).public_send(event, Sketchup.active_model)
       assert_nil cards.first['project_placements']
       assert_empty old_model.observers
-      old_timer.call
       assert_nil report
-      assert_equal 1, UI.timers.length
-      run_timer
+      assert_empty UI.timers
+      analyze
       assert_equal 0, cards.first['project_placements']
     end
   end
@@ -499,6 +735,21 @@ class ControllerRecognitionTest < Minitest::Test
     assert_equal 'Chosen', @catalogs.entries.first['name']
     assert_equal 'shared', other.get_attribute('MafLibrary', 'catalog_scope')
     assert_nil @definition.get_attribute('MafLibrary', 'catalog_id')
+    assert_nil report
+    assert_empty UI.timers
+  end
+
+  def test_editing_component_invalidates_report_without_queuing_analysis
+    @controller.send(:panel_ready)
+    analyze
+    original = report
+
+    @model.emit(:onActivePathChanged)
+
+    assert_same original, report
+    assert @controller.instance_variable_get(:@report_stale)
+    assert_equal({'report_stale' => true}, @dialog.payloads.last)
+    assert_empty UI.timers
   end
 
   def test_single_group_selection_without_scan
@@ -529,6 +780,8 @@ class ControllerRecognitionTest < Minitest::Test
     @dialog.callbacks.fetch('copy_selected_to_library').call(nil, 'shared', 'Copy', 'Seats')
     assert_equal 2, @catalogs.entries.length
     assert_equal 'shared', @definition.get_attribute('MafLibrary', 'catalog_scope')
+    assert_nil cards.find { |card| card['scope'] == 'personal' }['project_placements']
+    analyze
     assert_equal 0, cards.find { |card| card['scope'] == 'personal' }['project_placements']
     assert_equal 1, cards.find { |card| card['scope'] == 'shared' }['project_placements']
   end
@@ -541,10 +794,12 @@ class ControllerRecognitionTest < Minitest::Test
       expected = decision == 'clear' ? nil : decision
       actual = @definition.get_attribute('MafLibrary', 'maf_decision')
       expected.nil? ? assert_nil(actual) : assert_equal(expected, actual)
+      analyze
       refute report['models'].first['is_maf'] if decision == 'rejected'
     end
     assert_raises(ArgumentError) { @controller.send(:set_maf_decision, [row_id], 'wrong') }
     @model.entities.clear
+    @model.emit(:onTransactionCommit)
     assert_raises(StandardError) { @controller.send(:set_maf_decision, [row_id], 'confirmed') }
   end
 
@@ -589,6 +844,9 @@ class ControllerRecognitionTest < Minitest::Test
     assert_match(/disk full/, report['catalog_sync_errors'].first[:message])
     broken.singleton_class.remove_method(:save_copy)
     @dialog.callbacks.fetch('retry_catalog_sync').call(nil)
+    assert_equal 1, @catalogs.entries.length
+    assert @controller.instance_variable_get(:@report_stale) == false
+    analyze
     assert_equal 2, @catalogs.entries.length
     assert_empty report['catalog_sync_errors']
   end
@@ -704,7 +962,7 @@ class ControllerRecognitionTest
     Sketchup.active_model = @model = TransactionHistoryModel.new([@instance], @definition)
   end
 
-  def test_initial_incomplete_link_has_one_undo_step_and_refresh_preserves_redo
+  def test_manual_scan_after_undo_preserves_redo_and_recovers_link
     @definition.entities = [Object.new]
     @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
     history_model
@@ -714,26 +972,29 @@ class ControllerRecognitionTest
     @model.undo
     assert_nil @definition.get_attribute('MafLibrary', 'catalog_id')
     operations = @model.operations.length
-    run_timer
+    assert_empty UI.timers
+    assert_nil cards.first['project_placements']
+    analyze
     assert_equal operations, @model.operations.length, 'Undo reconciliation must not commit a new link operation'
     assert_equal 1, @model.redo_entries.length
     assert_equal 1, @catalogs.entries.length
     assert_equal 1, cards.first['project_placements']
     assert_equal original['id'], report['models'].first['catalog_id']
-    @controller.send(:refresh)
+    analyze
     assert_equal operations, @model.operations.length, 'manual analysis also preserves pending Redo'
     @controller.send(:panel_closed)
     ready
     assert_equal operations, @model.operations.length, 'reopening the panel also preserves pending Redo'
     assert_equal 1, @model.redo_entries.length
     @model.redo
-    run_timer
+    assert_empty UI.timers
+    analyze
     assert_equal original['id'], @definition.get_attribute('MafLibrary', 'catalog_id')
     assert_equal 1, @catalogs.entries.length
     assert_equal 1, cards.first['project_placements']
   end
 
-  def test_undo_then_redo_placement_preserves_counts_and_catalog_identity
+  def test_manual_scan_after_undo_then_redo_updates_counts_and_catalog_identity
     @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
     history_model
     ready
@@ -741,32 +1002,36 @@ class ControllerRecognitionTest
     @model.start_operation('Remove placement', true)
     @model.entities.clear
     @model.commit_operation
-    run_timer
+    assert_nil cards.first['project_placements']
+    analyze
     assert_equal 0, cards.first['project_placements']
     @model.undo
-    run_timer
+    assert_nil cards.first['project_placements']
+    analyze
     assert_equal 1, cards.first['project_placements']
     assert_equal 1, @model.redo_entries.length
     @model.redo
-    run_timer
+    assert_nil cards.first['project_placements']
+    analyze
     assert_equal 0, cards.first['project_placements']
     assert_equal original['id'], @catalogs.entries.first['id']
     assert_equal 1, @catalogs.entries.length
   end
 
-  def test_new_user_commit_after_undo_allows_persistent_recovery_without_duplicate
+  def test_manual_scan_after_user_commit_recovers_link_without_duplicate
     @definition.entities = [Object.new]
     @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
     history_model
     ready
     original = @catalogs.entries.first
     @model.undo
-    run_timer
+    assert_empty UI.timers
     assert_nil @definition.get_attribute('MafLibrary', 'catalog_id')
     @model.start_operation('Rename after Undo', true)
     @definition.set_attribute('OtherExtension', 'edit', 1)
     @model.commit_operation
-    run_timer
+    assert_empty UI.timers
+    analyze
     assert_equal original['id'], @definition.get_attribute('MafLibrary', 'catalog_id')
     assert_equal 1, @catalogs.entries.length
     assert_empty @model.redo_entries

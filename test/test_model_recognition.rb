@@ -15,10 +15,10 @@ class ModelRecognitionTest < Minitest::Test
     leaf.define_singleton_method(:insertion_point) { reads += 1; FakePoint.new(0, 0, 0) }
     edges = leaf.entities
     geometry_reads = 0
-    edges.define_singleton_method(:each) { |&block| geometry_reads += 1; super(&block) }
+    edges.define_singleton_method(:[]) { |index| geometry_reads += 1; super(index) }
     report = MafLibrary::ModelRecognition.new(raw, catalog_entries: []).apply
     assert_equal 1, reads, 'Catalog geometry evidence must be read once per definition'
-    assert_equal 1, geometry_reads, 'Geometry parameters must be read once per definition'
+    assert_equal 2, geometry_reads, 'One fingerprint read and one parameter read per physical entity'
     assert_equal 4, report['models'].find { |row| row['name'] == 'Shared' }['instances']
     assert_equal 8, report['summary']['maf_instances']
     prior = report['models'].find { |row| row['name'] == 'Shared' }['recognition_fingerprint']

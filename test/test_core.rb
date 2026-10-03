@@ -740,19 +740,23 @@ class ControllerTest < Minitest::Test
     UI.timers = {}
   end
 
-  def run_initial_timer
-    id, timer = UI.timers.first
-    refute_nil timer
-    UI.timers.delete(id)
-    timer.last.call
+  def analyze
+    @dialog.callbacks.fetch('scan').call(nil)
+    1000.times do
+      id, timer = UI.timers.first
+      break unless timer
+      UI.timers.delete(id)
+      timer.last.call
+    end
+    assert_empty UI.timers, 'analysis did not finish within 1000 timer steps'
   end
 
-  def test_opening_panel_queues_model_scan
+  def test_opening_panel_waits_for_explicit_scan
     Sketchup.active_model = FakeModel.new([])
     @dialog.callbacks.fetch('ready').call(nil)
     assert_nil @controller.instance_variable_get(:@last_report)
-    assert_equal [0.5], UI.timers.values.map(&:first)
-    run_initial_timer
+    assert_empty UI.timers
+    analyze
     payload = @dialog.payloads.last
     assert_equal [], payload.fetch('data').fetch('models')
     refute_nil @controller.instance_variable_get(:@last_report)
@@ -818,12 +822,11 @@ class ControllerTest < Minitest::Test
     assert_equal [report['models'].first['id']], @dialog.payloads.last.fetch('selected_rows')
   end
 
-  def test_scan_reports_elapsed_time_on_open_and_after_button_callback
+  def test_scan_reports_elapsed_time_only_after_button_callback
     Sketchup.active_model = FakeModel.new([Sketchup::ComponentInstance.new(FakeDefinition.new('Скамья'))])
     @dialog.callbacks.fetch('ready').call(nil)
-    run_initial_timer
-    assert_operator @dialog.payloads.last.fetch('analysis_seconds'), :>=, 0
-    @dialog.callbacks.fetch('scan').call(nil)
+    refute @dialog.payloads.any? { |payload| payload.key?('analysis_seconds') }
+    analyze
     payload = @dialog.payloads.last
     assert_equal 1, payload.fetch('data').fetch('summary').fetch('instances')
     assert_operator payload.fetch('analysis_seconds'), :>=, 0

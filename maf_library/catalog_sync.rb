@@ -16,6 +16,71 @@ module MafLibrary
     DICTIONARY = 'MafLibrary'.freeze
     WRITABLE_SCOPES = %w[personal shared].freeze
 
+    # One definition (or skipped row) is the smallest interruptible sync unit.
+    # SketchUp's save_copy and attribute transaction remain atomic within it.
+    class Session
+      def initialize(owner, report, write_links)
+        @owner = owner
+        @report = report
+        @rows = Array(report['models'])
+        @write_links = write_links
+        @row_index = 0
+        @definition_index = 0
+        @placements = {}
+        @result = {created: 0, linked: 0, errors: []}
+        @done = false
+      end
+
+      def done?
+        @done
+      end
+
+      def result
+        @result if @done
+      end
+
+      def step(max_definitions: 10, deadline: nil)
+        raise ArgumentError, 'max_definitions must be positive' unless max_definitions.to_i.positive?
+        return true if @done
+        processed = 0
+        while @row_index < @rows.length
+          break if processed >= max_definitions || (processed.positive? && deadline && Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline)
+          row = @rows[@row_index]
+          ids = row['is_maf'] == true ? Array(row['definition_ids']) : []
+          if @definition_index >= ids.length
+            finish_row(row)
+            processed += 1
+            next
+          end
+          id = ids[@definition_index]
+          @definition_index += 1
+          processed += 1
+          begin
+            @owner.__send__(:process_definition, @report, row, id, @write_links, @result)
+          rescue StandardError => error
+            @result[:errors] << {row_id: row['id'], code: @owner.__send__(:error_code, error), message: error.message}
+            finish_row(row)
+            next
+          end
+          finish_row(row) if @definition_index >= ids.length
+        end
+        return false unless @row_index >= @rows.length
+        @report['catalog_placements'] = @placements
+        @done = true
+      end
+
+      private
+
+      def finish_row(row)
+        if row['is_maf'] && row['recognized_catalog']
+          key = "#{row['recognized_catalog_scope']}:#{row['catalog_id']}"
+          @placements[key] = @placements.fetch(key, 0) + row['instances'].to_i
+        end
+        @row_index += 1
+        @definition_index = 0
+      end
+    end
+
     def initialize(model:, catalogs:)
       @model = model
       @catalogs = catalogs
@@ -27,54 +92,13 @@ module MafLibrary
     end
 
     def sync(report, write_links: true)
-      result = {created: 0, linked: 0, errors: []}
-      Array(report['models']).each do |row|
-        next unless row['is_maf'] == true
-        begin
-          Array(row['definition_ids']).each do |id|
-            reference = report.fetch('references').fetch(id.to_i)
-            definition = reference.fetch(:definition)
-            validate_definition(definition)
-            entry = linked_entry(definition) || recovered_entry(definition)
-            fingerprint = complete_fingerprint(row)
-            entry ||= exact_entry(fingerprint)
-            created = entry.nil?
-            if created
-              unless fingerprint || row['maf_decision'] == 'confirmed'
-                raise Blocked, 'Полный отпечаток недоступен. Подтвердите модель вручную'
-              end
-              entry = create_entry(definition, 'personal', row['name'], row['category'], row['recognition_source'], fingerprint)
-            end
-            bind(definition, entry, write: write_links)
-            row['catalog_id'] = entry['id']
-            row['catalog_scope'] = entry['scope']
-            row['catalog_version'] = definition.get_attribute(DICTIONARY, 'catalog_version') || entry['version']
-            row['recognized_catalog'] = true
-            row['recognized_catalog_scope'] = entry['scope']
-            warnings = (row['recognition_warnings'] ||= [])
-            saved_fingerprint = entry['recognition_fingerprint']
-            if saved_fingerprint.nil?
-              warnings << 'catalog_geometry_unverified'
-            elsif saved_fingerprint != fingerprint
-              warnings << 'catalog_geometry_drift'
-            end
-            warnings.uniq!
-            result[created ? :created : :linked] += 1
-            if entry['maf_confirmed'] != true
-              result[:errors] << {row_id: row['id'], catalog_id: entry['id'], scope: entry['scope'],
-                code: 'legacy_card_unconfirmed', message: 'Сохранённая карточка не подтверждена. Явно обновите версию для сохранения текущей модели'}
-            end
-          end
-        rescue StandardError => error
-          result[:errors] << {row_id: row['id'], code: error_code(error), message: error.message}
-        end
-      end
-      report['catalog_placements'] = Array(report['models']).each_with_object({}) do |row, counts|
-        next unless row['is_maf'] && row['recognized_catalog']
-        key = "#{row['recognized_catalog_scope']}:#{row['catalog_id']}"
-        counts[key] = counts.fetch(key, 0) + row['instances'].to_i
-      end
-      result
+      session = start_sync(report, write_links: write_links)
+      session.step(max_definitions: 1000) until session.done?
+      session.result
+    end
+
+    def start_sync(report, write_links: true)
+      Session.new(self, report, write_links)
     end
 
     def add_selected(definition:, scope:, name:, category:, copy_existing: false)
@@ -102,6 +126,42 @@ module MafLibrary
     end
 
     private
+
+    def process_definition(report, row, id, write_links, result)
+      reference = report.fetch('references').fetch(id.to_i)
+      definition = reference.fetch(:definition)
+      validate_definition(definition)
+      entry = linked_entry(definition) || recovered_entry(definition)
+      fingerprint = complete_fingerprint(row)
+      entry ||= exact_entry(fingerprint)
+      created = entry.nil?
+      if created
+        unless fingerprint || row['maf_decision'] == 'confirmed'
+          raise Blocked, 'Полный отпечаток недоступен. Подтвердите модель вручную'
+        end
+        entry = create_entry(definition, 'personal', row['name'], row['category'], row['recognition_source'], fingerprint,
+          metadata: row['metadata'])
+      end
+      bind(definition, entry, write: write_links)
+      row['catalog_id'] = entry['id']
+      row['catalog_scope'] = entry['scope']
+      row['catalog_version'] = definition.get_attribute(DICTIONARY, 'catalog_version') || entry['version']
+      row['recognized_catalog'] = true
+      row['recognized_catalog_scope'] = entry['scope']
+      warnings = (row['recognition_warnings'] ||= [])
+      saved_fingerprint = entry['recognition_fingerprint']
+      if saved_fingerprint.nil?
+        warnings << 'catalog_geometry_unverified'
+      elsif saved_fingerprint != fingerprint
+        warnings << 'catalog_geometry_drift'
+      end
+      warnings.uniq!
+      result[created ? :created : :linked] += 1
+      if entry['maf_confirmed'] != true
+        result[:errors] << {row_id: row['id'], catalog_id: entry['id'], scope: entry['scope'],
+          code: 'legacy_card_unconfirmed', message: 'Сохранённая карточка не подтверждена. Явно обновите версию для сохранения текущей модели'}
+      end
+    end
 
     def validate_definition(definition)
       raise Blocked, 'Определение недоступно. Повторите анализ или выделение' unless definition && definition.valid?
@@ -138,9 +198,10 @@ module MafLibrary
       matches.first
     end
 
-    def create_entry(definition, scope, name, category, source, fingerprint)
+    def create_entry(definition, scope, name, category, source, fingerprint, metadata: nil)
       @catalogs.catalog(scope).add_definition(definition, name: name, category: category,
-        maf_confirmed: true, recognition_source: source, recognition_fingerprint: fingerprint).merge('scope' => scope)
+        maf_confirmed: true, recognition_source: source, recognition_fingerprint: fingerprint,
+        metadata: metadata).merge('scope' => scope)
     end
 
     def bind(definition, entry, manual: false, write: true)

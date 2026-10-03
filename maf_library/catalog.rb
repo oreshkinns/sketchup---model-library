@@ -57,7 +57,7 @@ module MafLibrary
       File.join(root, 'models', "#{id}.skp")
     end
 
-    def add_definition(definition, category:, name: nil, maf_confirmed: nil, recognition_source: nil, recognition_fingerprint: nil)
+    def add_definition(definition, category:, name: nil, maf_confirmed: nil, recognition_source: nil, recognition_fingerprint: nil, metadata: nil)
       name = (name.nil? ? definition.name : name).to_s.strip
       raise ArgumentError, 'Компонент должен иметь название' if name.empty?
       FileUtils.mkdir_p(File.join(root, 'models'))
@@ -72,7 +72,17 @@ module MafLibrary
       entry = {'id' => id, 'name' => name, 'category' => category.to_s.empty? ? 'Другое' : category,
                'version' => 1, 'sha256' => Digest::SHA256.file(destination).hexdigest,
                'file_size_bytes' => File.size(destination), 'tags' => [], 'favorite' => false}
-      entry.merge!(Metadata.for_definition(definition))
+      if metadata
+        # Recognition already visited this geometry in interruptible steps.
+        # Store only catalog fields, with the same millimeter precision as the
+        # ordinary selected-add path.
+        bbox = metadata['bbox_mm']
+        entry.merge!('bbox_mm' => bbox && !bbox.empty? ? bbox.map { |value| value.round(1) } : nil,
+          'faces_count' => metadata.fetch('faces_count'), 'edges_count' => metadata.fetch('edges_count'),
+          'materials_count' => metadata.fetch('materials_count'))
+      else
+        entry.merge!(Metadata.for_definition(definition))
+      end
       unless maf_confirmed.nil?
         entry.merge!('maf_confirmed' => maf_confirmed == true, 'recognition_source' => recognition_source,
           'recognition_fingerprint' => recognition_fingerprint)
