@@ -7,6 +7,9 @@ module MafLibrary
       ['Площадки', ['качели', 'горка', 'площадка', 'площадки', 'swing', 'slide', 'playground'], [[500, 30000], [300, 30000], [300, 15000]]]
     ].freeze
     EXCLUSIONS = %w[окно оконный дверь фасад витраж window door facade glazing].freeze
+    TERM_PATTERNS = (PROFILES.flat_map { |profile| profile[1] } + EXCLUSIONS).uniq.each_with_object({}) do |term, patterns|
+      patterns[term] = /(?<![\p{L}\p{N}_])#{Regexp.escape(term)}(?![\p{L}\p{N}_])/i
+    end.freeze
 
     def self.evaluate(names:, category:, tags:, metadata:, flags:, complete:)
       texts = (Array(names) + [category] + Array(tags)).map { |text| text.to_s.downcase }
@@ -31,7 +34,10 @@ module MafLibrary
     end
 
     def self.contains_term?(texts, terms)
-      terms.any? { |term| texts.any? { |text| /(?<![\p{L}\p{N}_])#{Regexp.escape(term)}(?![\p{L}\p{N}_])/i.match?(text) } }
+      terms.any? do |term|
+        pattern = TERM_PATTERNS.fetch(term)
+        texts.any? { |text| pattern.match?(text) }
+      end
     end
     private_class_method :contains_term?
 

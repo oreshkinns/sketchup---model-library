@@ -114,6 +114,16 @@ class RecognitionRulesTest < Minitest::Test
     assert_candidate(names: ['Component#1'])
   end
 
+  def test_rule_matching_scales_to_large_model_inventory
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    2_750.times do |index|
+      result = evaluate(names: ["Component#{index}"], category: 'Без категории')
+      assert_equal 'candidate', result.fetch('source')
+    end
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    assert_operator elapsed, :<, 5.0, "Rule matching took #{elapsed.round(2)} s for 2,750 definitions"
+  end
+
   def test_blank_names_remain_candidate_despite_type_metadata
     assert_candidate(names: ['', '  '], category: 'Скамейки', tags: ['bench'])
     assert_candidate(names: [], category: 'Скамейки')

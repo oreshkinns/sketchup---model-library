@@ -81,6 +81,36 @@ assert.equal(await card.locator('[data-placement-count]').textContent(),'В те
 await p.evaluate(data=>MAF.receive({data}),fixture());
 assert.equal(await card.locator('[data-placement-count]').textContent(),'В текущем проекте: 5 размещений');
 });
+test('stale-only notice preserves rendered model, duplicate and catalog nodes',async t=>{
+const data=fixture();
+data.duplicates=[{id:'dupe',label:'Скамья',classification:'confirmed',confidence:'Полная сигнатура совпадает',definitions:[{id:'1',name:'Модель 1',instances:3},{id:'2',name:'Модель 2',instances:2}]}];
+const p=await open(t,data);
+const result=await p.evaluate(()=>{
+  const before={model:document.querySelector('[data-node="yard/1"]'),duplicate:document.querySelector('#duplicates-list .duplicate'),catalog:document.querySelector('[data-card-key="personal:same"]')};
+  MAF.receive({report_stale:true});
+  return {
+    model:before.model===document.querySelector('[data-node="yard/1"]'),
+    duplicate:before.duplicate===document.querySelector('#duplicates-list .duplicate'),
+    catalog:before.catalog===document.querySelector('[data-card-key="personal:same"]'),
+    stale:!document.querySelector('#report-stale').hidden,
+    counts:Array.from(document.querySelectorAll('[data-placement-count]'),item=>item.textContent)
+  };
+});
+assert.deepEqual(result,{model:true,duplicate:true,catalog:true,stale:true,counts:['В текущем проекте: —','В текущем проекте: —']});
+});
+test('stale marker and full data together render the catalog once',async t=>{
+const p=await open(t);
+const mutations=await p.evaluate(data=>{
+  const observer=new MutationObserver(()=>{});
+  observer.observe(document.querySelector('#catalog-list'),{childList:true});
+  MAF.receive({report_stale:false,data});
+  const count=observer.takeRecords().length;
+  observer.disconnect();
+  return count;
+},fixture());
+assert.equal(mutations,1);
+assert.equal(await p.locator('[data-card-key="personal:same"] [data-placement-count]').textContent(),'В текущем проекте: 5 размещений');
+});
 test('candidate parameters, reasons and warnings are separate, decisions preview global scope',async t=>{
 const p=await open(t);
 await p.locator('.nav [data-page="overview"]').click();
