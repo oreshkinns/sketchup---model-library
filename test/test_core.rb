@@ -16,7 +16,7 @@ module Sketchup
     def valid? = true
     def glued_to = nil
     def erase!
-      parent.delete(self) if parent
+      parent.entities.delete(self) if parent
       @erased = true
     end
     def erased? = !!@erased
@@ -36,8 +36,8 @@ module Sketchup
       instance = Sketchup::ComponentInstance.new(definition)
       instance.name = name
       if parent
-        index = parent.index(self)
-        parent[index] = instance
+        index = parent.entities.index(self)
+        parent.entities[index] = instance
         instance.parent = parent
       end
       instance
@@ -93,11 +93,11 @@ class FakeModel
   def commit_operation; end
   def abort_operation; end
   private
-  def bind_parents(entities)
+  def bind_parents(entities, owner = self)
     entities.each do |entity|
       next unless entity.is_a?(Sketchup::ComponentInstance) || entity.is_a?(Sketchup::Group)
-      entity.parent = entities
-      bind_parents(entity.definition.entities)
+      entity.parent = owner
+      bind_parents(entity.definition.entities, entity.definition)
     end
   end
 end

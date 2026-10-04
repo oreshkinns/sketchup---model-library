@@ -55,6 +55,27 @@ assert.equal(await p.locator('#stop-scan').isVisible(),true);
 assert.equal(await p.locator('#stop-scan').isEnabled(),true);
 });
 
+test('each duplicate card focuses its own definitions with colliding group IDs and after rerender',async t=>{
+const data=fixture();
+data.duplicates=[
+{id:'shared',label:'Первая',confidence:'Совпадает',kind:'component',definitions:[{id:'1',name:'A',instances:1},{id:'2',name:'B',instances:1}]},
+{id:'shared',label:'Вторая',confidence:'Кандидат',kind:'group',replaceable:false,definitions:[{id:'3',name:'C',instances:1},{id:'4',name:'D',instances:1}]}
+];
+const p=await open(t,data);
+await p.locator('.nav [data-page="duplicates"]').click();
+await p.locator('[data-duplicate-choice][value="1"]').check();
+await p.locator('[data-focus-duplicate]').nth(1).click();
+assert.deepEqual((await calls(p,'focus_duplicates')).at(-1),['focus_duplicates',['3','4']]);
+await p.locator('[data-focus-duplicate]').nth(0).click();
+assert.deepEqual((await calls(p,'focus_duplicates')).at(-1),['focus_duplicates',['1','2']]);
+data.duplicates=data.duplicates.map((group,index)=>({...group,definitions:group.definitions.map((definition,offset)=>({...definition,id:String(5+index*2+offset)}))}));
+await p.evaluate(data=>MAF.receive({data}),data);
+assert.equal(await p.locator('[data-focus-duplicate]').count(),2);
+await p.locator('[data-focus-duplicate]').nth(1).click();
+assert.deepEqual((await calls(p,'focus_duplicates')).at(-1),['focus_duplicates',['7','8']]);
+assert.equal((await calls(p,'scan')).length,0);
+});
+
 test('Stop requests cancellation once and waits for backend acknowledgement',async t=>{
 const p=await open(t);
 await p.locator('#scan').click();

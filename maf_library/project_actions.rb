@@ -1,4 +1,5 @@
 require_relative 'catalog_sync'
+require_relative 'duplicate_focus'
 
 module MafLibrary
   class ProjectActions
@@ -30,12 +31,19 @@ module MafLibrary
         raise Blocked, 'Состав дублей изменился. Запустите анализ повторно' unless item && item[:definition].object_id.to_s == id && item[:definition].valid?
         item[:refs].values
       end
+      paths = refs.flat_map { |ref| ref[:paths] }.uniq
+      unless !paths.empty? && paths.all? { |path| current_instance_path?(path) && keys.include?(path.last.definition.object_id.to_s) }
+        raise Blocked, 'Состав дублей изменился. Запустите анализ повторно'
+      end
       targets = selectable_targets(refs)
-      raise Blocked, 'Выбранные дубли недоступны в текущем контексте редактирования' if targets.empty?
+      if paths.all? { |path| path.length == 1 } && !@model.active_path
+        @model.active_view.zoom(targets)
+      elsif !DuplicateFocus.zoom(@model.active_view, paths)
+        raise Blocked, 'У выбранных дублей нет геометрии для фокусировки'
+      end
       @model.selection.clear
-      @model.selection.add(targets)
-      @model.active_view.zoom(targets)
-      targets.length
+      @model.selection.add(targets) unless targets.empty?
+      paths.length
     end
 
     def rename(ids, name)
@@ -205,6 +213,16 @@ module MafLibrary
       refs.flat_map do |ref|
         ref[:paths].filter_map { |path| path.find { |entity| active.key?(entity.object_id) } }
       end.uniq
+    end
+
+    def current_instance_path?(path)
+      return false if path.empty?
+      owner = @model
+      path.all? do |entity|
+        next false unless entity.valid? && entity.parent == owner
+        owner = entity.definition
+        true
+      end
     end
 
     def selected_rows(ids)
