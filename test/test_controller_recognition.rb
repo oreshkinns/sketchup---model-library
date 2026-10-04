@@ -201,7 +201,7 @@ class ControllerRecognitionTest < Minitest::Test
         self.reads = reads.to_i + 1
         super
       end
-    end.new(Array.new(500) { FakeEdge.new })
+    end.new(Array.new(10_000) { FakeEdge.new })
     @definition.entities = entities
     @model.emit(:onTransactionCommit)
     @dialog.callbacks.fetch('scan').call(nil)
@@ -366,6 +366,53 @@ class ControllerRecognitionTest < Minitest::Test
     drain_scan_timers
     refute_nil report
     assert_equal 'idle', scan_state
+  end
+
+  def test_fast_large_inventory_does_not_spend_hundreds_of_ticks_waiting
+    Sketchup.active_model = @model = RecognitionControllerModel.new(Array.new(10_000) { FakeEdge.new })
+    @controller.send(:panel_ready)
+    @dialog.callbacks.fetch('scan').call(nil)
+    12.times do
+      break if UI.timers.empty?
+      run_timer
+    end
+    refute_nil report, 'Fast geometry should use the available time slice instead of waiting after every 100 entities'
+    assert_equal 0, report['summary']['instances']
+    assert_empty UI.timers
+  end
+
+  def test_large_inventory_still_yields_at_deadline_and_stop_prevents_more_reads
+    entities = Array.new(10_000) { FakeEdge.new }
+    reads = 0
+    original_read = entities.method(:[])
+    entities.define_singleton_method(:[]) { |index| reads += 1; original_read.call(index) }
+    Sketchup.active_model = @model = RecognitionControllerModel.new(entities)
+    @controller.send(:panel_ready)
+    @dialog.callbacks.fetch('scan').call(nil)
+    clock = 0.0
+    Process.stub(:clock_gettime, ->(*) { clock += 0.001 }) { run_timer }
+    assert_operator reads, :>, 0
+    assert_operator reads, :<, 30
+    assert_nil report
+    queued = UI.timers.values.first.last
+    @dialog.callbacks.fetch('cancel_scan').call(nil)
+    previous_reads = reads
+    queued.call
+    assert_equal previous_reads, reads
+    assert_empty UI.timers
+  end
+
+  def test_fast_large_definition_enrichment_uses_available_time_slice
+    @definition.entities = Array.new(10_000) { FakeEdge.new }
+    @controller.send(:panel_ready)
+    @dialog.callbacks.fetch('scan').call(nil)
+    20.times do
+      break if UI.timers.empty?
+      run_timer
+    end
+    refute_nil report, 'Recognition geometry must not retain the tiny entity cap after the analyzer advances'
+    assert_equal 10_000, report['models'].first['metadata']['edges_count']
+    assert_empty UI.timers
   end
 
   def test_stop_button_cancels_queued_analysis_without_publishing_report

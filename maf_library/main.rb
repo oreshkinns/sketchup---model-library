@@ -92,6 +92,8 @@ module MafLibrary
   end
 
   class Controller
+    SCAN_ENTITY_BUDGET = 5_000
+
     def initialize
       settings_file = File.join(Dir.home, '.maf_library', 'settings.json')
       @settings = Settings.new(settings_file, personal: File.join(Dir.home, 'MAF Library'),
@@ -377,13 +379,15 @@ module MafLibrary
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 0.02
       case job[:phase]
       when :analyze, :analyze_again
-        if job[:session].step(max_entities: 100, deadline: deadline)
+        # Let inexpensive entities fill the time slice. A tiny fixed batch
+        # otherwise adds a UI timer delay after every hundred edges/faces.
+        if job[:session].step(max_entities: SCAN_ENTITY_BUDGET, deadline: deadline)
           job[:report] = job[:session].result
           job[:session] = ModelRecognition.new(job[:report], catalog_entries: job[:catalogs].entries).start_apply
           job[:phase] = job[:phase] == :analyze ? :recognize : :recognize_again
         end
       when :recognize
-        if job[:session].step(max_rows: 10, deadline: deadline)
+        if job[:session].step(max_rows: 10, max_entities: SCAN_ENTITY_BUDGET, deadline: deadline)
           job[:report] = job[:session].result
           job[:links_before] = link_snapshot(job[:report])
           job[:session] = CatalogSync.new(model: job[:model], catalogs: job[:catalogs]).start_sync(
@@ -402,7 +406,7 @@ module MafLibrary
           end
         end
       when :recognize_again
-        if job[:session].step(max_rows: 10, deadline: deadline)
+        if job[:session].step(max_rows: 10, max_entities: SCAN_ENTITY_BUDGET, deadline: deadline)
           job[:report] = job[:session].result
           prepare_scan_cards(job)
         end
