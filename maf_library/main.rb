@@ -897,7 +897,7 @@ module MafLibrary
       definitions = model.definitions
       existing = definitions.to_a
       definition = definitions.load(path)
-      raise 'Файл каталога не содержит геометрии' if definition.entities.empty?
+      raise 'Файл каталога не содержит геометрии' if definition.entities.length.zero?
       if existing.include?(definition)
         # SketchUp may reuse a live definition for a previously loaded path.
         # File verification says nothing about edits to that live definition.

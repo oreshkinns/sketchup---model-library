@@ -94,6 +94,16 @@ class SerializedControllerDefinitions < Array
   end
 end
 
+# Sketchup::Entities includes Enumerable, but does not implement Array#empty?.
+class NativeControllerEntities
+  include Enumerable
+  def initialize(items) = @items = items
+  def each(&block) = @items.each(&block)
+  def [](index) = @items[index]
+  def length = @items.length
+  alias_method :size, :length
+end
+
 class ControllerRecognitionTest < Minitest::Test
   def test_changing_library_path_during_card_build_cancels_scan_without_old_cards_or_restart
     @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
@@ -598,6 +608,37 @@ class ControllerRecognitionTest < Minitest::Test
     @model.define_singleton_method(:place_component) { |definition| placed = definition; true }
     @controller.send(:place_model, entry['id'])
     assert_loaded_metadata(entry, placed)
+  end
+
+  def test_placement_callback_accepts_native_entities_without_empty_method
+    serialized_selection
+    saved = @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    fresh_model_for_catalog_load
+    definitions = @model.definitions
+    original_load = definitions.method(:load)
+    definitions.define_singleton_method(:load) do |path|
+      definition = original_load.call(path)
+      definition.entities = NativeControllerEntities.new(definition.entities)
+      definition
+    end
+    placed = nil
+    @model.define_singleton_method(:place_component) { |definition| placed = definition; true }
+    @model.define_singleton_method(:abort_operation) {}
+    capture_io { @dialog.callbacks.fetch('place_model').call(nil, saved['id']) }
+    refute @dialog.payloads.last['error'], @dialog.payloads.last['message']
+    refute_nil placed
+    assert_loaded_metadata(@catalogs.find(saved['id']), placed)
+  end
+
+  def test_catalog_load_rejects_empty_native_entities
+    serialized_selection
+    saved = @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')
+    fresh_model_for_catalog_load
+    definition = SerializedControllerDefinition.new('Empty', [])
+    definition.entities = NativeControllerEntities.new([])
+    @model.definitions.define_singleton_method(:load) { |_| definition }
+    error = assert_raises(RuntimeError) { @controller.send(:load_catalog_definition, @catalogs.find(saved['id'])) }
+    assert_match(/не содержит геометрии/, error.message)
   end
 
   def test_array_load_normalizes_copied_card_identity

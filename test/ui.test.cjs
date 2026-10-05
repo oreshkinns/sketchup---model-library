@@ -33,6 +33,75 @@ return page;
 }
 async function calls(page,name){return page.evaluate(name=>window.calls.filter(x=>x[0]===name),name);
 }
+
+test('thumbnail image stays within its frame for all aspect ratios and widths',async t=>{
+  const p=await open(t);
+  for(const width of [640,1000,1440]){
+    await p.setViewportSize({width,height:900});
+    for(const [w,h] of [[256,256],[200,600],[600,200]]){
+      const data=fixture();
+      data.catalog[0].thumbnail='data:image/svg+xml;base64,'+Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="100%" height="100%" fill="green"/></svg>`).toString('base64');
+      await p.evaluate(data=>MAF.receive({data}),data);
+      await p.locator('.catalog-art img').evaluate(img=>img.decode());
+      const bounds=await p.locator('.catalog-art img').evaluate(img=>{
+        const image=img.getBoundingClientRect(),frame=img.parentElement.getBoundingClientRect();
+        return {fits:image.top>=frame.top-.5&&image.bottom<=frame.bottom+.5&&image.left>=frame.left-.5&&image.right<=frame.right+.5,fit:getComputedStyle(img).objectFit};
+      });
+      assert.equal(bounds.fits,true,`Image ${w}x${h}, viewport ${width}`);
+      assert.equal(bounds.fit,'contain');
+    }
+  }
+});
+
+function largeFixture(){
+  const data=fixture();
+  data.models=Array.from({length:350},(_,i)=>row(String(i),{category:i===349?'Последний раздел':'Скамейки'}));
+  data.hierarchy=data.models.map((r,i)=>node(`node-${i}`,String(i)));
+  data.duplicates=Array.from({length:350},(_,i)=>({id:`dup-${i}`,label:`Дубль ${i}`,classification:'candidate',definitions:[{id:String(i),name:`Модель ${i}`,instances:1}]}));
+  data.catalog=Array.from({length:350},(_,i)=>({id:`card-${i}`,scope:'personal',name:`Карточка ${i}`}));
+  data.sections=['Скамейки','Последний раздел'];
+  return data;
+}
+
+test('large reports render only the active page with bounded reachable batches',async t=>{
+  const p=await open(t,largeFixture());
+  assert.equal(await p.locator('#models-body tr').count(),0);
+  assert.equal(await p.locator('#recognition-list details').count(),0);
+  assert.equal(await p.locator('#duplicates-list .duplicate').count(),0);
+  assert.ok(await p.locator('.catalog-card').count()<=100);
+  for(let i=0;i<3;i++)await p.locator('[data-page-next="catalog"]').click();
+  await p.locator('[data-place="card-349"]').click();
+  assert.deepEqual((await calls(p,'place_model')).at(-1),['place_model','card-349']);
+  await p.evaluate(()=>MAF.receive({report_stale:true}));
+  await p.locator('.nav [data-page="overview"]').click();
+  assert.ok(await p.locator('#models-body tr').count()<=100);
+  assert.ok(await p.locator('#recognition-list details').count()<=100);
+  assert.equal(await p.locator('.catalog-card').count(),0);
+  assert.equal(await p.locator('#report-stale').isVisible(),true);
+  for(let i=0;i<3;i++)await p.locator('[data-page-next="models"]').click();
+  await p.locator('[data-node="node-349"]').click();
+  assert.deepEqual((await calls(p,'select_rows')).at(-1),['select_rows',['definition:349']]);
+  await p.locator('#model-section').selectOption('Последний раздел');
+  assert.equal(await p.locator('#models-body .model-row').count(),1);
+  assert.equal(await p.locator('[data-node="node-349"]').count(),1);
+  await p.locator('.nav [data-page="duplicates"]').click();
+  assert.equal(await p.locator('#models-body tr').count(),0);
+  assert.ok(await p.locator('.duplicate').count()<=100);
+  for(let i=0;i<3;i++)await p.locator('[data-page-next="duplicates"]').click();
+  await p.locator('[data-duplicate-choice][value="349"]').check();
+  await p.locator('#focus-duplicates').click();
+  assert.deepEqual((await calls(p,'focus_duplicates')).at(-1),['focus_duplicates',['349']]);
+  assert.equal((await calls(p,'scan')).length,0);
+});
+
+test('opening a specific catalog card reaches its batch after adding selection',async t=>{
+  const p=await open(t,largeFixture());
+  await p.locator('.nav [data-page="overview"]').click();
+  await p.evaluate(()=>MAF.receive({open_catalog_id:'card-349',open_catalog_scope:'personal',report_stale:true}));
+  assert.equal(await p.locator('[data-card-key="personal:card-349"]').count(),1);
+  assert.equal(await p.locator('[data-card-key="personal:card-349"]').evaluate(card=>card===document.activeElement),true);
+  assert.equal((await calls(p,'scan')).length,0);
+});
 test('library is first navigation and initial page, with separate add controls',async t=>{
 const p=await open(t);
 assert.equal(await p.locator('.nav [data-page]').first().getAttribute('data-page'),'catalog');
