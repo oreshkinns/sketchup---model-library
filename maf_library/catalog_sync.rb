@@ -1,5 +1,6 @@
 require_relative 'definition_signature'
 require_relative 'catalog_recovery'
+require_relative 'selected_export'
 
 module MafLibrary
   # Reconciles local confirmation evidence without changing existing assets.
@@ -26,7 +27,7 @@ module MafLibrary
         @write_links = write_links
         @row_index = 0
         @definition_index = 0
-        @placements = {}
+        @placements = report.fetch('catalog_placements', {}).select { |_key, count| count.nil? }
         @result = {created: 0, linked: 0, errors: []}
         @done = false
       end
@@ -65,6 +66,7 @@ module MafLibrary
           finish_row(row) if @definition_index >= ids.length
         end
         return false unless @row_index >= @rows.length
+        @placements.merge!(@report.fetch('catalog_placements', {}).select { |_key, count| count.nil? })
         @report['catalog_placements'] = @placements
         @done = true
       end
@@ -74,7 +76,7 @@ module MafLibrary
       def finish_row(row)
         if row['is_maf'] && row['recognized_catalog']
           key = "#{row['recognized_catalog_scope']}:#{row['catalog_id']}"
-          @placements[key] = @placements.fetch(key, 0) + row['instances'].to_i
+          @placements[key] = @placements.fetch(key, 0) + row['instances'].to_i unless @placements.key?(key) && @placements[key].nil?
         end
         @row_index += 1
         @definition_index = 0
@@ -101,26 +103,50 @@ module MafLibrary
       Session.new(self, report, write_links)
     end
 
-    def add_selected(definition:, scope:, name:, category:, copy_existing: false)
+    def add_selected(definition:, scope:, name:, category:, copy_existing: false, entity: nil)
       raise ArgumentError, 'Эта библиотека доступна только для чтения' unless WRITABLE_SCOPES.include?(scope)
       validate_definition(definition)
       existing = linked_entry(definition)
       recovering = existing.nil?
       existing ||= recovered_entry(definition)
+      transform = SelectedExport.for_path(Array(@model.active_path) + [entity]) if entity
+      if entity && entity.respond_to?(:glued_to) && entity.glued_to && transform
+        raise Blocked, 'Для приклеенного компонента сначала создайте обычную копию'
+      end
       if existing && existing['scope'] != scope && !copy_existing
         raise Blocked, 'Модель уже связана с другой библиотекой. Используйте отдельное действие «Создать копию»'
       end
       if existing && existing['scope'] == scope && !copy_existing
+        if transform && existing['instance_export'] != true
+          raise Blocked, 'Карточка сохранена без масштаба выделенного экземпляра. Для исправленного размера используйте «Создать копию»'
+        end
+        if transform || existing['instance_export'] == true
+          verified = false
+          SelectedExport.with_definition(@model, definition, transform) do |candidate|
+            signature = DefinitionSignature.new(mode: :catalog).call(candidate)
+            verified = signature[:complete] && !signature[:sampled] && signature[:digest] == existing['recognition_fingerprint']
+          end
+          unless verified
+            raise Blocked, 'Размер выделенного экземпляра отличается от сохранённой карточки. Для исправленного размера используйте «Создать копию»'
+          end
+        end
         bind(definition, existing, manual: true)
         return without_scope(existing, recovery_definition: recovering ? definition : nil)
       end
-      signature = DefinitionSignature.new(mode: :catalog).call(definition)
-      fingerprint = signature[:digest] if signature[:complete] && !signature[:sampled]
-      entry = exact_entry(fingerprint) unless copy_existing
-      if entry && entry['scope'] != scope
-        raise Blocked, 'Точная копия уже есть в другой библиотеке. Используйте отдельное действие «Создать копию»'
+      entry = nil
+      SelectedExport.with_definition(@model, definition, transform) do |candidate|
+        signature = DefinitionSignature.new(mode: :catalog).call(candidate)
+        fingerprint = signature[:digest] if signature[:complete] && !signature[:sampled]
+        entry = exact_entry(fingerprint) unless copy_existing
+        if transform && entry && entry['instance_export'] != true
+          raise Blocked, 'Точная геометрия уже есть в каталоге. Для отдельной масштабной карточки используйте «Создать копию»'
+        end
+        if entry && entry['scope'] != scope
+          raise Blocked, 'Точная копия уже есть в другой библиотеке. Используйте отдельное действие «Создать копию»'
+        end
+        instance_export = !!transform || definition.get_attribute(DICTIONARY, 'instance_export') == true
+        entry ||= create_entry(candidate, scope, name, category, 'manual', fingerprint, instance_export: instance_export)
       end
-      entry ||= create_entry(definition, scope, name, category, 'manual', fingerprint)
       bind(definition, entry, manual: true)
       without_scope(entry)
     end
@@ -136,6 +162,9 @@ module MafLibrary
       entry ||= exact_entry(fingerprint)
       created = entry.nil?
       if created
+        if SelectedExport.scaled_paths?(reference)
+          raise Blocked.new('У модели есть масштабные размещения. Выделите нужный экземпляр и сохраните его в библиотеку', code: 'scaled_selection_required')
+        end
         unless fingerprint || row['maf_decision'] == 'confirmed'
           raise Blocked, 'Полный отпечаток недоступен. Подтвердите модель вручную'
         end
@@ -143,6 +172,14 @@ module MafLibrary
           metadata: row['metadata'])
       end
       bind(definition, entry, write: write_links)
+      if SelectedExport.unverified_variant?(entry, fingerprint)
+        row['recognized_catalog'] = false
+        row['recognized_catalog_scope'] = row['catalog_id'] = row['catalog_scope'] = row['catalog_version'] = nil
+        (row['recognition_warnings'] ||= []) << 'catalog_instance_variant'
+        (report['catalog_placements'] ||= {})["#{entry['scope']}:#{entry['id']}"] = nil
+        result[:linked] += 1
+        return
+      end
       row['catalog_id'] = entry['id']
       row['catalog_scope'] = entry['scope']
       row['catalog_version'] = definition.get_attribute(DICTIONARY, 'catalog_version') || entry['version']
@@ -198,10 +235,10 @@ module MafLibrary
       matches.first
     end
 
-    def create_entry(definition, scope, name, category, source, fingerprint, metadata: nil)
+    def create_entry(definition, scope, name, category, source, fingerprint, metadata: nil, instance_export: false)
       @catalogs.catalog(scope).add_definition(definition, name: name, category: category,
         maf_confirmed: true, recognition_source: source, recognition_fingerprint: fingerprint,
-        metadata: metadata).merge('scope' => scope)
+        metadata: metadata, instance_export: instance_export).merge('scope' => scope)
     end
 
     def bind(definition, entry, manual: false, write: true)

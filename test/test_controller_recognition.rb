@@ -563,6 +563,91 @@ class ControllerRecognitionTest < Minitest::Test
     assert_loaded_metadata(entry, loaded)
   end
 
+  def test_copy_of_loaded_scaled_variant_retains_replacement_protection
+    serialized_selection
+    original = @controller.send(:add_selected_to_library, 'personal', 'Baked bench', 'Seats')
+    @catalogs.catalog('personal').send(:update_entry, original['id']) { |entry| entry['instance_export'] = true }
+    loaded = load_in_fresh_model(@catalogs.find(original['id']))
+    @instance = Sketchup::ComponentInstance.new(loaded)
+    @instance.parent = @model
+    @model.entities << @instance
+    select
+    copied = @controller.send(:add_selected_to_library, 'shared', 'Copied baked bench', 'Seats', copy_existing: true)
+    entry = @catalogs.find(copied['id'])
+    assert_equal true, entry['instance_export']
+    copied_definition = load_in_fresh_model(entry)
+    source = Sketchup::ComponentInstance.new(FakeDefinition.new('Original raw bench', [FakeEdge.new]))
+    error = assert_raises(MafLibrary::Replacement::Blocked) do
+      MafLibrary::Replacement.new(@model, {}).replace_instances([source], copied_definition)
+    end
+    assert_match(/масштаб/i, error.message)
+  end
+
+  def test_pack_round_trip_of_scaled_variant_retains_replacement_protection
+    serialized_selection
+    original = @controller.send(:add_selected_to_library, 'personal', 'Baked bench', 'Seats')
+    catalog = @catalogs.catalog('personal')
+    catalog.send(:update_entry, original['id']) { |entry| entry['instance_export'] = true }
+    pack = File.join(@dir, 'scaled-pack')
+    assert_equal 1, MafLibrary::PackTransfer.export(catalog, pack, ids: [original['id']])
+    assert_equal({imported: 1, skipped: 0}, MafLibrary::PackTransfer.import(@catalogs.catalog('shared'), pack))
+    entry = @catalogs.catalog('shared').entries.first.merge('scope' => 'shared')
+    refute_equal original['id'], entry['id']
+    refute entry.key?('maf_confirmed')
+    refute entry.key?('recognition_fingerprint')
+    loaded = load_in_fresh_model(entry)
+    source_definition = FakeDefinition.new('Original raw bench', [FakeEdge.new])
+    source = Sketchup::ComponentInstance.new(source_definition)
+    source.define_singleton_method(:transformation) do
+      Struct.new(:to_a).new([0.1, 0, 0, 0, 0, 0.1, 0, 0, 0, 0, 0.1, 0, 0, 0, 0, 1])
+    end
+    error = assert_raises(MafLibrary::Replacement::Blocked) do
+      MafLibrary::Replacement.new(@model, {}).replace_instances([source], loaded)
+    end
+    assert_match(/масштаб/i, error.message)
+    assert_same source_definition, source.definition
+    assert_equal true, entry['instance_export']
+    assert_equal true, loaded.get_attribute('MafLibrary', 'instance_export')
+  end
+
+  def test_pack_round_trip_of_unscaled_card_allows_replacement
+    serialized_selection
+    original = @controller.send(:add_selected_to_library, 'personal', 'Unscaled bench', 'Seats')
+    pack = File.join(@dir, 'unscaled-pack')
+    MafLibrary::PackTransfer.export(@catalogs.catalog('personal'), pack, ids: [original['id']])
+    MafLibrary::PackTransfer.import(@catalogs.catalog('shared'), pack)
+    entry = @catalogs.catalog('shared').entries.first.merge('scope' => 'shared')
+    refute entry.key?('instance_export')
+    refute entry.key?('maf_confirmed')
+    refute entry.key?('recognition_fingerprint')
+    loaded = load_in_fresh_model(entry)
+    source = Sketchup::ComponentInstance.new(FakeDefinition.new('Another bench', [FakeEdge.new]))
+    result = MafLibrary::Replacement.new(@model, {}).replace_instances([source], loaded)
+    assert_equal 1, result[:entities]
+    assert_same loaded, source.definition
+    assert_equal false, loaded.get_attribute('MafLibrary', 'instance_export')
+  end
+
+  def test_legacy_version_update_rejects_current_scaled_placements_without_mutation
+    select
+    entry = @controller.send(:add_selected_to_library, 'personal', 'Legacy raw bench', 'Seats')
+    catalog = @catalogs.catalog('personal')
+    original_file = File.binread(catalog.file_for(entry['id']))
+    original_entry = catalog.find(entry['id'])
+    @definition.entities.first.end.position.x = 10
+    @instance.define_singleton_method(:transformation) do
+      Struct.new(:to_a).new([0.1, 0, 0, 0, 0, 0.1, 0, 0, 0, 0, 0.1, 0, 0, 0, 0, 1])
+    end
+    attributes = @definition.instance_variable_get(:@attrs).dup
+    error = assert_raises(ArgumentError) do
+      @controller.send(:update_catalog_version, entry['id'], @definition, 'personal')
+    end
+    assert_match(/Создать копию/, error.message)
+    assert_equal original_file, File.binread(catalog.file_for(entry['id']))
+    assert_equal original_entry, catalog.find(entry['id'])
+    assert_equal attributes, @definition.instance_variable_get(:@attrs)
+  end
+
   def test_version_round_trip_load_normalizes_serialized_prior_version
     serialized_selection
     saved = @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')

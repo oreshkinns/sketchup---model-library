@@ -48,6 +48,9 @@ module MafLibrary
       blocked = []
       blocked << {entity: nil, reason: 'Нет экземпляров для замены'} if refs.empty?
       blocked << {entity: nil, reason: 'Эталон больше не существует'} if target.respond_to?(:valid?) && !target.valid?
+      if target.respond_to?(:get_attribute) && target.get_attribute('MafLibrary', 'instance_export') == true
+        blocked << {entity: nil, reason: 'Масштабную копию разместите отдельно: автоматическая замена может повторно применить масштаб'}
+      end
       blocked << {entity: nil, reason: 'Live Component нельзя использовать для замены'} if target.respond_to?(:live_component?) && target.live_component?
       blocked << {entity: nil, reason: 'Динамический компонент нельзя использовать для замены'} if dynamic?(target)
       sources.each do |source|

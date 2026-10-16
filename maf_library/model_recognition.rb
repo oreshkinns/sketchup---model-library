@@ -1,5 +1,6 @@
 require_relative 'definition_signature'
 require_relative 'recognition_rules'
+require_relative 'selected_export'
 
 module MafLibrary
   # Enriches the existing definition inventory without changing action IDs or
@@ -358,6 +359,13 @@ module MafLibrary
     end
 
     def recognize_catalog(row, entry)
+      if SelectedExport.unverified_variant?(entry, row['recognition_complete'] && !row['recognition_sampled'] ? row['recognition_fingerprint'] : nil)
+        @placements["#{entry['scope']}:#{entry['id']}"] = nil
+        row['recognized_catalog'] = false
+        row['recognized_catalog_scope'] = row['catalog_id'] = row['catalog_scope'] = row['catalog_version'] = nil
+        row['recognition_warnings'] << 'catalog_instance_variant'
+        return
+      end
       row['recognized_catalog'] = true
       row['recognized_catalog_scope'] = entry['scope']
       row['catalog_scope'] = entry['scope']
@@ -380,7 +388,7 @@ module MafLibrary
       @counts['maf_definitions'] += row['definitions'].to_i
       return unless row['recognized_catalog']
       key = "#{row['recognized_catalog_scope']}:#{row['catalog_id']}"
-      @placements[key] = @placements.fetch(key, 0) + row['instances'].to_i
+      @placements[key] = @placements.fetch(key, 0) + row['instances'].to_i unless @placements.key?(key) && @placements[key].nil?
     end
 
     def finish_counts

@@ -140,7 +140,7 @@ module MafLibrary
         id = definition.object_id
         @reader.instance_variable_set(:@uncertain, frame[:uncertain])
         evidence = [frame[:length], @reader.__send__(:bounds_token, definition),
-          @reader.__send__(:attributes_token, definition),
+          @reader.__send__(:attributes_token, definition, definition_context: true),
           (@reader.instance_variable_get(:@mode) == :duplicate ? @reader.__send__(:library_metadata_token, definition) : []),
           @reader.__send__(:behavior_token, definition), tokens.sort_by(&:to_s)]
         if @reader.instance_variable_get(:@mode) == :catalog
@@ -183,7 +183,7 @@ module MafLibrary
         (entity.is_a?(Sketchup::ComponentInstance) || entity.is_a?(Sketchup::Group)) &&
           @signature_sampled[entity.definition.object_id]
       end
-      evidence = [length, bounds_token(definition), attributes_token(definition),
+      evidence = [length, bounds_token(definition), attributes_token(definition, definition_context: true),
                                                        (@mode == :duplicate ? library_metadata_token(definition) : []),
                                                        behavior_token(definition), tokens.sort_by(&:to_s)]
       if @mode == :catalog
@@ -305,11 +305,17 @@ module MafLibrary
       state
     end
 
-    def attributes_token(object)
+    def attributes_token(object, definition_context: false)
       return [] unless object.respond_to?(:attribute_dictionaries)
       dictionaries = object.attribute_dictionaries
       return [] unless dictionaries
-      dictionaries.reject { |dictionary| @mode == :catalog && dictionary.name.to_s == DICTIONARY }.map do |dictionary|
+      dictionaries.reject do |dictionary|
+        # The native SKP loader injects model shadow/location context into the
+        # imported root definition. It is not saved component geometry. Keep
+        # all vendor dictionaries and entity attributes in exact evidence.
+        @mode == :catalog && (dictionary.name.to_s == DICTIONARY ||
+          definition_context && dictionary.name.to_s == 'TempShadowInfo')
+      end.map do |dictionary|
         [dictionary.name.to_s, dictionary.map { |key, value| [key.to_s, stable_value(value)] }.sort_by(&:first)]
       end.sort_by(&:first)
     rescue StandardError

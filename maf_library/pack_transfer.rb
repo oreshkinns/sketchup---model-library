@@ -29,7 +29,7 @@ module MafLibrary
         end
         item.slice('id', 'name', 'category', 'version', 'sha256', 'tags', 'favorite',
                    'file_size_bytes', 'bbox_mm', 'faces_count', 'edges_count',
-                   'materials_count', 'thumbnail').merge('sha256' => Digest::SHA256.file(source).hexdigest)
+                   'materials_count', 'thumbnail', 'instance_export').merge('sha256' => Digest::SHA256.file(source).hexdigest)
       end
       File.write(File.join(folder, 'pack.json'), JSON.pretty_generate({'version' => 1, 'items' => records}), mode: 'w:UTF-8')
       records.length
@@ -63,7 +63,9 @@ module MafLibrary
           skipped += 1
           next
         end
-        entry = catalog.import(path, name: item['name'].to_s, category: item['category'].to_s)
+        # Preserve replacement safety without trusting imported confirmation or identity.
+        entry = catalog.import(path, name: item['name'].to_s, category: item['category'].to_s,
+          instance_export: item['instance_export'] == true)
         catalog.update_details(entry['id'], tags: item['tags'], favorite: item['favorite'], metadata: item)
         thumb = item['thumbnail'].to_s
         if thumb.match?(/\A[0-9a-f-]{36}\.(png|jpg|webp)\z/) && thumb.start_with?("#{item['id']}.")

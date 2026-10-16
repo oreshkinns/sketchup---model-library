@@ -931,6 +931,7 @@ module MafLibrary
         definition.set_attribute(Analyzer::DICTIONARY, 'source_sha', entry['sha256'])
         definition.set_attribute(Analyzer::DICTIONARY, 'category', entry['category'])
         definition.set_attribute(Analyzer::DICTIONARY, 'catalog_version', entry['version'])
+        definition.set_attribute(Analyzer::DICTIONARY, 'instance_export', entry['instance_export'] == true)
       elsif catalog_id.to_s == entry['id'].to_s && source_sha.to_s == entry['sha256'].to_s &&
             definition.get_attribute(Analyzer::DICTIONARY, 'catalog_version').to_s.empty?
         # Upgrade v0.4.1 metadata only when both identity and content hash still match.
@@ -1014,9 +1015,10 @@ module MafLibrary
 
     def add_selected_to_library(scope, name, category, copy_existing: false)
       definition = selected_definition
+      entity = model.selection.to_a.first
       entry = with_service_writes do
         CatalogSync.new(model: model, catalogs: recognition_catalogs).add_selected(
-          definition: definition, scope: scope, name: name, category: category, copy_existing: copy_existing)
+          definition: definition, entity: entity, scope: scope, name: name, category: category, copy_existing: copy_existing)
       end
       invalidate_report(nil, catalog_changed: true) if @dialog && @dialog.visible? && !@panel_closed
       push(open_catalog_id: entry['id'], open_catalog_scope: scope,
@@ -1075,7 +1077,7 @@ module MafLibrary
              definition.get_attribute(Analyzer::DICTIONARY, 'catalog_scope') == entry['scope']
         raise ArgumentError, 'Выбранная модель не связана с этой карточкой'
       end
-      updated = @catalogs.catalog(entry['scope']).update_definition_version(id, definition)
+      updated = @catalogs.catalog(entry['scope']).update_definition_version(id, definition, model: model)
       with_service_writes do
         model.start_operation('Обновить версию МАФ', true)
         begin

@@ -6,6 +6,7 @@ require 'base64'
 require 'time'
 require_relative 'metadata'
 require_relative 'definition_signature'
+require_relative 'selected_export'
 
 module MafLibrary
   class Catalog
@@ -25,7 +26,7 @@ module MafLibrary
       data
     end
 
-    def import(source, name:, category:)
+    def import(source, name:, category:, instance_export: false)
       raise ArgumentError, 'Выберите существующий файл .skp' unless File.file?(source) && File.extname(source).downcase == '.skp'
       name = name.to_s.strip
       raise ArgumentError, 'Укажите название модели' if name.empty?
@@ -38,6 +39,7 @@ module MafLibrary
       entry = {'id' => id, 'name' => name, 'category' => category, 'version' => 1,
                'sha256' => Digest::SHA256.file(destination).hexdigest,
                'file_size_bytes' => File.size(destination), 'tags' => [], 'favorite' => false}
+      entry['instance_export'] = true if instance_export == true
       items = entries
       items << entry
       save(items)
@@ -57,7 +59,7 @@ module MafLibrary
       File.join(root, 'models', "#{id}.skp")
     end
 
-    def add_definition(definition, category:, name: nil, maf_confirmed: nil, recognition_source: nil, recognition_fingerprint: nil, metadata: nil)
+    def add_definition(definition, category:, name: nil, maf_confirmed: nil, recognition_source: nil, recognition_fingerprint: nil, metadata: nil, instance_export: false)
       name = (name.nil? ? definition.name : name).to_s.strip
       raise ArgumentError, 'Компонент должен иметь название' if name.empty?
       FileUtils.mkdir_p(File.join(root, 'models'))
@@ -72,6 +74,7 @@ module MafLibrary
       entry = {'id' => id, 'name' => name, 'category' => category.to_s.empty? ? 'Другое' : category,
                'version' => 1, 'sha256' => Digest::SHA256.file(destination).hexdigest,
                'file_size_bytes' => File.size(destination), 'tags' => [], 'favorite' => false}
+      entry['instance_export'] = true if instance_export
       if metadata
         # Recognition already visited this geometry in interruptible steps.
         # Store only catalog fields, with the same millimeter precision as the
@@ -99,10 +102,17 @@ module MafLibrary
 
     # Call only for an explicit user-requested version update. Candidate writes
     # finish before either live file changes; backups cover manifest failures.
-    def update_definition_version(id, definition)
+    def update_definition_version(id, definition, model: nil)
       items = entries
       entry = items.find { |item| item['id'] == id }
       raise ArgumentError, 'Модель не найдена в каталоге' unless entry
+      if entry['instance_export'] == true
+        raise ArgumentError, 'Масштабную копию нельзя обновить исходным определением. Выделите нужный экземпляр и используйте «Создать копию»'
+      end
+      current_model = model || (definition.model if definition.respond_to?(:model))
+      if current_model && SelectedExport.scaled_definition_paths?(current_model, definition)
+        raise ArgumentError, 'У модели есть масштабные размещения. Выделите нужный экземпляр и используйте «Создать копию»'
+      end
       destination = File.join(root, 'models', "#{id}.skp")
       raise ArgumentError, 'Файл модели отсутствует в каталоге' unless File.file?(destination)
       token = SecureRandom.uuid

@@ -167,6 +167,28 @@ class DefinitionSignatureTest
     linked.start.define_singleton_method(:edges) { [linked] }
     refute_equal fingerprint(FakeDefinition.new('A', [FakeEdge.new]))[:digest], fingerprint(FakeDefinition.new('B', [linked]))[:digest]
   end
+
+  def test_native_loader_shadow_context_does_not_change_catalog_definition_identity
+    original = FakeDefinition.new('A', [FakeEdge.new])
+    loaded = FakeDefinition.new('A', [FakeEdge.new])
+    loaded.define_singleton_method(:attribute_dictionaries) do
+      [Dictionary.new('TempShadowInfo', {'Latitude' => 40.018309, 'DisplayShadows' => false})]
+    end
+    assert_equal fingerprint(original)[:digest], fingerprint(loaded)[:digest]
+    assert fingerprint(loaded)[:complete]
+    refute_equal MafLibrary::DefinitionSignature.new(mode: :duplicate).call(original)[:digest],
+      MafLibrary::DefinitionSignature.new(mode: :duplicate).call(loaded)[:digest]
+
+    changed = FakeDefinition.new('A', [FakeEdge.new])
+    changed.define_singleton_method(:attribute_dictionaries) do
+      [Dictionary.new('TempShadowInfo', {'Latitude' => 40.018309}), Dictionary.new('OtherExtension', {'state' => 1})]
+    end
+    refute_equal fingerprint(original)[:digest], fingerprint(changed)[:digest]
+
+    edge = FakeEdge.new
+    edge.define_singleton_method(:attribute_dictionaries) { [Dictionary.new('TempShadowInfo', {'custom' => 1})] }
+    refute_equal fingerprint(original)[:digest], fingerprint(FakeDefinition.new('A', [edge]))[:digest]
+  end
 end
 
 class DefinitionSignatureTest

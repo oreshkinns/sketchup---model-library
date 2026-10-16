@@ -146,8 +146,12 @@ module MafLibrary
 
     def add_to_library(ids, scope, copy_existing: false)
       rows = selected_rows(ids)
+      list = definitions(rows)
+      if list.any? { |definition| SelectedExport.scaled_paths?(@report['references'].fetch(definition.object_id)) }
+        raise Blocked, 'У модели есть масштабные размещения. Выделите один экземпляр в SketchUp и сохраните его в библиотеку'
+      end
       sync = CatalogSync.new(model: @model, catalogs: @catalog)
-      definitions(rows).each do |definition|
+      list.each do |definition|
         category = definition.get_attribute(Analyzer::DICTIONARY, 'category') || 'Другое'
         sync.add_selected(definition: definition, scope: scope, name: definition.name,
           category: category, copy_existing: copy_existing)
@@ -160,7 +164,7 @@ module MafLibrary
       unless selection.length == 1 && (entity.is_a?(Sketchup::ComponentInstance) || entity.is_a?(Sketchup::Group)) && entity.valid?
         raise Blocked, 'Выделите один компонент или группу в SketchUp'
       end
-      CatalogSync.new(model: @model, catalogs: @catalog).add_selected(definition: entity.definition,
+      CatalogSync.new(model: @model, catalogs: @catalog).add_selected(definition: entity.definition, entity: entity,
         scope: scope, name: name, category: category, copy_existing: copy_existing)
     end
     def replace(ids, target_id)
