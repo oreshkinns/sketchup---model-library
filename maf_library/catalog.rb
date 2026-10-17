@@ -7,6 +7,7 @@ require 'time'
 require_relative 'metadata'
 require_relative 'definition_signature'
 require_relative 'selected_export'
+require_relative 'thumbnail'
 
 module MafLibrary
   class Catalog
@@ -59,17 +60,19 @@ module MafLibrary
       File.join(root, 'models', "#{id}.skp")
     end
 
-    def add_definition(definition, category:, name: nil, maf_confirmed: nil, recognition_source: nil, recognition_fingerprint: nil, metadata: nil, instance_export: false)
+    def add_definition(definition, category:, name: nil, maf_confirmed: nil, recognition_source: nil, recognition_fingerprint: nil, metadata: nil, instance_export: false, temporary_definition: false)
       name = (name.nil? ? definition.name : name).to_s.strip
       raise ArgumentError, 'Компонент должен иметь название' if name.empty?
       FileUtils.mkdir_p(File.join(root, 'models'))
       id = SecureRandom.uuid
       destination = File.join(root, 'models', "#{id}.skp")
-      saved = if definition.respond_to?(:save_copy)
+      saved = Thumbnail.with_camera(definition, temporary_definition: temporary_definition) do
+        if definition.respond_to?(:save_copy)
                 definition.save_copy(destination)
               else
                 definition.save_as(destination)
               end
+      end
       raise 'SketchUp не сохранил компонент' unless saved && File.file?(destination)
       entry = {'id' => id, 'name' => name, 'category' => category.to_s.empty? ? 'Другое' : category,
                'version' => 1, 'sha256' => Digest::SHA256.file(destination).hexdigest,
@@ -93,7 +96,7 @@ module MafLibrary
       items = entries
       items << entry
       save(items)
-      generate_thumbnail(id, definition)
+      generate_thumbnail(id, definition, temporary_definition: temporary_definition)
       entry
     rescue StandardError
       File.delete(destination) if destination && File.file?(destination)
@@ -257,13 +260,14 @@ module MafLibrary
       write_thumbnail(id, bytes, ext)
     end
 
-    def generate_thumbnail(id, definition = nil)
+    def generate_thumbnail(id, definition = nil, temporary_definition: false)
       entry = find(id)
       return false unless entry
       FileUtils.mkdir_p(File.join(root, 'thumbnails'))
       path = File.join(root, 'thumbnails', "#{id}.png")
-      saved = definition.save_thumbnail(path) if definition && definition.respond_to?(:save_thumbnail)
-      if !saved && defined?(Sketchup) && Sketchup.respond_to?(:save_thumbnail)
+      if definition && definition.respond_to?(:save_thumbnail)
+        saved = Thumbnail.save(definition, path, temporary_definition: temporary_definition)
+      elsif defined?(Sketchup) && Sketchup.respond_to?(:save_thumbnail)
         saved = Sketchup.save_thumbnail(file_for(id), path)
       end
       if saved && File.file?(path)

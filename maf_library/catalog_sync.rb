@@ -134,21 +134,27 @@ module MafLibrary
         return without_scope(existing, recovery_definition: recovering ? definition : nil)
       end
       entry = nil
-      SelectedExport.with_definition(@model, definition, transform) do |candidate|
+      export_warnings = []
+      SelectedExport.with_definition(@model, definition, transform) do |candidate, preparation|
+        preparation ||= {changed: !!transform, warnings: []}
+        export_warnings = preparation[:warnings]
         signature = DefinitionSignature.new(mode: :catalog).call(candidate)
         fingerprint = signature[:digest] if signature[:complete] && !signature[:sampled]
         entry = exact_entry(fingerprint) unless copy_existing
-        if transform && entry && entry['instance_export'] != true
+        if preparation[:changed] && entry && entry['instance_export'] != true
           raise Blocked, 'Точная геометрия уже есть в каталоге. Для отдельной масштабной карточки используйте «Создать копию»'
         end
         if entry && entry['scope'] != scope
           raise Blocked, 'Точная копия уже есть в другой библиотеке. Используйте отдельное действие «Создать копию»'
         end
-        instance_export = !!transform || definition.get_attribute(DICTIONARY, 'instance_export') == true
-        entry ||= create_entry(candidate, scope, name, category, 'manual', fingerprint, instance_export: instance_export)
+        instance_export = preparation[:changed] || definition.get_attribute(DICTIONARY, 'instance_export') == true
+        entry ||= create_entry(candidate, scope, name, category, 'manual', fingerprint,
+          instance_export: instance_export, temporary_definition: preparation[:temporary_definition] == true)
       end
       bind(definition, entry, manual: true)
-      without_scope(entry)
+      result = without_scope(entry)
+      result['export_warnings'] = export_warnings unless export_warnings.empty?
+      result
     end
 
     private
@@ -235,10 +241,10 @@ module MafLibrary
       matches.first
     end
 
-    def create_entry(definition, scope, name, category, source, fingerprint, metadata: nil, instance_export: false)
+    def create_entry(definition, scope, name, category, source, fingerprint, metadata: nil, instance_export: false, temporary_definition: false)
       @catalogs.catalog(scope).add_definition(definition, name: name, category: category,
         maf_confirmed: true, recognition_source: source, recognition_fingerprint: fingerprint,
-        metadata: metadata, instance_export: instance_export).merge('scope' => scope)
+        metadata: metadata, instance_export: instance_export, temporary_definition: temporary_definition).merge('scope' => scope)
     end
 
     def bind(definition, entry, manual: false, write: true)

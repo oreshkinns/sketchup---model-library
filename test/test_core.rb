@@ -772,28 +772,33 @@ class ControllerTest < Minitest::Test
     assert_nil @controller.instance_variable_get(:@last_report)
   end
 
-  def test_import_thumbnail_falls_back_to_loaded_definition_and_aborts_temporary_load
+  def test_import_thumbnail_extracts_managed_file_without_loading_source_model
+    original_save = Sketchup.method(:save_thumbnail) if Sketchup.respond_to?(:save_thumbnail)
     Dir.mktmpdir do |dir|
       source = File.join(dir, 'window.skp')
       File.binwrite(source, 'skp')
       catalog = MafLibrary::Catalog.new(File.join(dir, 'library'))
       entry = catalog.import(source, name: 'Окно', category: 'Окна')
-      definition = FakeDefinition.new('Окно')
-      definition.define_singleton_method(:save_thumbnail) do |path|
+      extracted_paths = []
+      Sketchup.define_singleton_method(:save_thumbnail) do |source_path, path|
+        extracted_paths << source_path
         File.binwrite(path, "\x89PNG\r\n\x1A\n".b)
         true
       end
       loaded = Class.new do
-        attr_reader :aborted
-        define_method(:definitions) { self }
-        define_method(:load) { |_path| definition }
-        define_method(:start_operation) { |_name, _ui| nil }
-        define_method(:abort_operation) { @aborted = true }
+        def definitions; raise 'Readonly thumbnail loaded a live definition'; end
+        def start_operation(*); raise 'Readonly thumbnail changed model history'; end
       end.new
       Sketchup.active_model = loaded
       assert @controller.send(:ensure_thumbnail, catalog, entry['id'])
-      assert loaded.aborted
+      assert_equal [catalog.file_for(entry['id'])], extracted_paths
       assert File.file?(catalog.thumbnail_path(entry['id']))
+    end
+  ensure
+    if original_save
+      Sketchup.define_singleton_method(:save_thumbnail, original_save)
+    else
+      Sketchup.singleton_class.send(:remove_method, :save_thumbnail)
     end
   end
 

@@ -636,17 +636,7 @@ module MafLibrary
 
     def ensure_thumbnail(catalog, id)
       return true if catalog.thumbnail_path(id)
-      return true if catalog.generate_thumbnail(id)
-      path = catalog.file_for(id)
-      return false unless path && File.file?(path)
-      current = model
-      current.start_operation('Создать миниатюру МАФ', true)
-      begin
-        definition = current.definitions.load(path)
-        catalog.generate_thumbnail(id, definition)
-      ensure
-        current.abort_operation
-      end
+      catalog.generate_thumbnail(id)
     rescue StandardError
       false
     end
@@ -1022,7 +1012,7 @@ module MafLibrary
       end
       invalidate_report(nil, catalog_changed: true) if @dialog && @dialog.visible? && !@panel_closed
       push(open_catalog_id: entry['id'], open_catalog_scope: scope,
-        message: "Модель «#{entry['name']}» в библиотеке.", recognition_warnings: entry['recognition_warnings'])
+        message: (["Модель «#{entry['name']}» в библиотеке."] + Array(entry['export_warnings'])).join(' '), recognition_warnings: entry['recognition_warnings'])
       entry
     end
 
@@ -1104,7 +1094,7 @@ module MafLibrary
         definition = load_catalog_definition(entry)
         if entry['scope'] != 'cloud'
           catalog = @catalogs.catalog(entry['scope'])
-          catalog.generate_thumbnail(id, definition) unless catalog.thumbnail_path(id)
+          catalog.generate_thumbnail(id) unless catalog.thumbnail_path(id)
         end
         current.commit_operation
       rescue StandardError
@@ -1144,7 +1134,7 @@ module MafLibrary
       definition = load_catalog_definition(entry)
       if entry['scope'] != 'cloud'
         catalog = @catalogs.catalog(entry['scope'])
-        catalog.generate_thumbnail(id, definition) unless catalog.thumbnail_path(id)
+        catalog.generate_thumbnail(id) unless catalog.thumbnail_path(id)
       end
       tool = ArrayTool.new(model, definition, mode, spacing_mm, surface_options) do |count|
         entry['scope'] == 'cloud' ? @settings.mark_cloud_used(id) : @catalogs.catalog(entry['scope']).mark_used(id)
