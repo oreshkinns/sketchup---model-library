@@ -34,6 +34,72 @@ return page;
 async function calls(page,name){return page.evaluate(name=>window.calls.filter(x=>x[0]===name),name);
 }
 
+test('library switches between list and different card sizes',async t=>{
+  const p=await open(t);
+  await p.locator('[data-catalog-layout="list"]').click();
+  assert.equal(await p.locator('#catalog-list').getAttribute('data-layout'),'list');
+  await p.locator('[data-catalog-layout="small"]').click();
+  assert.equal(await p.locator('#catalog-list').getAttribute('data-layout'),'small');
+  await p.locator('[data-catalog-layout="large"]').click();
+  assert.equal(await p.locator('#catalog-list').getAttribute('data-layout'),'large');
+});
+
+test('duplicate comparison requests previews for the correct definitions and reports incomplete matches',async t=>{
+  const data=fixture();
+  data.duplicates=[{id:'compare',label:'Скамья',classification:'candidate',replaceable:false,confidence:'Требует проверки',definitions:[{id:'1',name:'A',instances:3},{id:'3',name:'B',instances:2}]}];
+  const p=await open(t,data);
+  await p.locator('.nav [data-page="duplicates"]').click();
+  assert.equal(await p.locator('.duplicate-comparison tbody tr').count(),2);
+  assert.match(await p.locator('.duplicate-comparison').textContent(),/Габариты|Грани/);
+  assert.equal(await p.locator('[data-duplicate="compare"]').isDisabled(),true);
+  assert.deepEqual((await calls(p,'duplicate_previews')).at(-1).slice(0,3),['duplicate_previews','compare',['1','3']]);
+  await p.locator('[data-load-previews="compare"]').click();
+  const request=(await calls(p,'duplicate_previews')).at(-1);
+  assert.deepEqual(request.slice(0,3),['duplicate_previews','compare',['1','3']]);
+  await p.evaluate(token=>MAF.receive({duplicate_previews:{group_id:'compare',ids:['1','3'],token,images:{'1':'data:image/png;base64,aGVsbG8='}}}),request[3]);
+  assert.equal(await p.locator('.duplicate-comparison img').count(),1);
+  assert.match(await p.locator('.duplicate-comparison').textContent(),/Нет превью/);
+  await p.evaluate(()=>MAF.receive({report_stale:true}));
+  assert.equal(await p.locator('.duplicate-comparison img').count(),0);
+  assert.equal(await p.locator('[data-load-previews="compare"]').isDisabled(),true);
+  assert.match(await p.locator('#duplicates-list').textContent(),/Отчёт устарел/);
+  await p.evaluate(token=>MAF.receive({duplicate_previews:{group_id:'compare',ids:['1','3'],token,images:{'1':'data:image/png;base64,aGVsbG8='}}}),request[3]);
+  assert.equal(await p.locator('.duplicate-comparison img').count(),0,'Late preview must not reappear after staleness');
+});
+
+test('section deletion confirms the named empty section',async t=>{
+  const data=fixture();data.sections.push('Пустой раздел');
+  const p=await open(t,data);
+  await p.locator('.nav [data-page="sections"]').click();
+  await p.locator('[data-delete-section="Пустой раздел"]').click();
+  assert.match(await p.locator('#modal-description').textContent(),/Пустой раздел/);
+  await p.locator('#confirm').click();
+  assert.deepEqual((await calls(p,'delete_section')).at(-1),['delete_section','Пустой раздел']);
+  assert.equal(await p.locator('[data-delete-section="Другое"]').count(),0);
+});
+
+test('library card can move between sections using its precise library scope',async t=>{
+  const data=fixture();data.sections.push('Новый раздел');
+  const p=await open(t,data);
+  const card=p.locator('[data-card-key="shared:same"]');
+  await card.locator('summary').filter({hasText:'Подробнее'}).click();
+  await card.locator('[data-change-catalog-section]').click();
+  await p.locator('#modal-select').selectOption('Новый раздел');
+  await p.locator('#confirm').click();
+  assert.deepEqual((await calls(p,'change_catalog_section')).at(-1),['change_catalog_section','same','shared','Новый раздел']);
+});
+
+test('cleanup displays actual unused definitions and confirms selected IDs',async t=>{
+  const data=fixture();data.cleanup={unused_definitions:2,unused_items:[{id:'41',name:'Unused A'},{id:'42',name:'Unused B'}]};
+  const p=await open(t,data);
+  await p.locator('.nav [data-page="cleanup"]').click();
+  await p.locator('[data-cleanup-id="41"]').check();
+  await p.locator('#cleanup-selected').click();
+  assert.match(await p.locator('#modal-description').textContent(),/Unused A/);
+  await p.locator('#confirm').click();
+  assert.deepEqual((await calls(p,'remove_unused_definitions')).at(-1),['remove_unused_definitions',['41']]);
+});
+
 test('thumbnail image stays within its frame for all aspect ratios and widths',async t=>{
   const p=await open(t);
   for(const width of [640,1000,1440]){
@@ -84,6 +150,7 @@ test('large reports render only the active page with bounded reachable batches',
   await p.locator('#model-section').selectOption('Последний раздел');
   assert.equal(await p.locator('#models-body .model-row').count(),1);
   assert.equal(await p.locator('[data-node="node-349"]').count(),1);
+  await p.evaluate(()=>MAF.receive({report_stale:false}));
   await p.locator('.nav [data-page="duplicates"]').click();
   assert.equal(await p.locator('#models-body tr').count(),0);
   assert.ok(await p.locator('.duplicate').count()<=100);

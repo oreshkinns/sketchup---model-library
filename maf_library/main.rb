@@ -1,5 +1,7 @@
 require 'json'
 require 'digest'
+require 'tmpdir'
+require 'base64'
 require_relative 'report_export'
 require_relative 'catalog'
 require_relative 'settings'
@@ -217,6 +219,12 @@ module MafLibrary
       @dialog.add_action_callback('focus_duplicates') do |_context, ids|
         safely { focus_duplicates(ids) }
       end
+      @dialog.add_action_callback('duplicate_previews') do |_context, group_id, ids, token|
+        safely { duplicate_previews(group_id.to_s, ids, token.to_s) }
+      end
+      @dialog.add_action_callback('remove_unused_definitions') do |_context, ids|
+        safely { remove_unused_definitions(ids) }
+      end
       @dialog.add_action_callback('import_model') { |_context, scope| safely { import_model(scope.to_s) } }
       @dialog.add_action_callback('place_model') { |_context, id| safely { place_model(id.to_s) } }
       @dialog.add_action_callback('delete_catalog_model') do |_context, id, scope|
@@ -244,6 +252,10 @@ module MafLibrary
         preview_safely(token.to_s) { preview_replace_duplicates(group_id.to_s, target_id.to_s, token.to_s) }
       end
       @dialog.add_action_callback('create_section') { |_context, name| safely { create_section(name.to_s) } }
+      @dialog.add_action_callback('delete_section') { |_context, name| safely { delete_section(name.to_s) } }
+      @dialog.add_action_callback('change_catalog_section') do |_context, id, scope, section|
+        safely { change_catalog_section(id.to_s, scope.to_s, section.to_s) }
+      end
       @dialog.add_action_callback('choose_library_path') { |_context, scope| safely { choose_library_path(scope.to_s) } }
       @dialog.add_action_callback('set_cloud_url') { |_context, url| safely { set_cloud_url(url.to_s) } }
       @dialog.add_action_callback('sync_cloud') { |_context| safely { sync_cloud } }
@@ -460,6 +472,8 @@ module MafLibrary
       job[:definitions] = job[:model].definitions.to_a
       job[:definition_index] = 0
       job[:unused_definitions] = 0
+      job[:unused_items] = []
+      job[:unused_references] = {}
       job[:phase] = :cleanup
     end
 
@@ -469,7 +483,12 @@ module MafLibrary
       while job[:definition_index] < definitions.length
         break if processed >= 100 || (processed.positive? && Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline)
         definition = definitions[job[:definition_index]]
-        job[:unused_definitions] += 1 if !definition.group? && !definition.image? && definition.count_used_instances == 0
+        if unused_definition?(definition)
+          job[:unused_definitions] += 1
+          id = definition.object_id.to_s
+          job[:unused_items] << {'id' => id, 'name' => definition.name.to_s.empty? ? 'Без названия' : definition.name.to_s}
+          job[:unused_references][id] = definition
+        end
         job[:definition_index] += 1
         processed += 1
       end
@@ -480,6 +499,7 @@ module MafLibrary
       return unless @scan_job.equal?(job)
       report = job[:report]
       @last_report = report
+      @cleanup_references = job[:unused_references]
       @report_stale = false
       @refreshing = false
       @scan_job = nil
@@ -488,7 +508,7 @@ module MafLibrary
       data['catalog'] = job[:cards]
       data['sections'] = @settings.sections
       data['settings'] = @settings.paths.merge('cloud_url' => @settings.cloud_url)
-      data['cleanup'] = {'unused_definitions' => job[:unused_definitions]}
+      data['cleanup'] = {'unused_definitions' => job[:unused_definitions], 'unused_items' => job[:unused_items]}
       valid_ids = data['models'].map { |row| row['id'] }
       @selected_row_ids &= valid_ids
       push(data: data, selected_rows: @selected_row_ids, message: 'Анализ завершен.', report_stale: false,
@@ -718,16 +738,68 @@ module MafLibrary
     end
 
     def focus_duplicates(ids)
-      raise 'Запустите анализ модели' unless @last_report && @last_model == model
+      report = fresh_report
       keys = Array(ids).map(&:to_s).uniq
-      allowed = @last_report['duplicates'].flat_map { |group| group['definitions'].map { |item| item['id'] } }
+      allowed = report['duplicates'].flat_map { |group| group['definitions'].map { |item| item['id'] } }
       raise 'Выберите модели из списка дублей' if keys.empty? || (keys - allowed).any?
+      validate_report_definitions(report, keys)
       @syncing_selection = true
-      count = ProjectActions.new(model, @last_report, @catalogs).focus_definitions(keys)
+      count = ProjectActions.new(model, report, @catalogs).focus_definitions(keys)
       @expected_selection_ids = model.selection.map(&:object_id).sort
       push(message: "В фокусе размещений: #{count}.")
     ensure
       @syncing_selection = false
+    end
+
+    def duplicate_previews(group_id, ids, token)
+      report = fresh_report
+      keys = Array(ids).map(&:to_s).uniq
+      group = report.fetch('duplicates').find do |candidate|
+        candidate['id'].to_s == group_id && candidate['definitions'].map { |item| item['id'].to_s }.sort == keys.sort
+      end
+      raise ArgumentError, 'Группа дублей изменилась. Повторите анализ' unless group && keys.length <= 30
+      validate_report_definitions(report, keys)
+      images = {}
+      Dir.mktmpdir('maf-preview-') do |folder|
+        keys.each_with_index do |id, index|
+          definition = report.fetch('references').fetch(id.to_i).fetch(:definition)
+          next unless definition.respond_to?(:save_thumbnail)
+          path = File.join(folder, "preview-#{index}.png")
+          if definition.save_thumbnail(path) && File.file?(path) && File.size(path) <= 2_000_000
+            images[id] = 'data:image/png;base64,' + Base64.strict_encode64(File.binread(path))
+          end
+        rescue StandardError
+          next
+        end
+      end
+      push(duplicate_previews: {group_id: group_id, ids: keys, images: images, token: token})
+    end
+
+    def unused_definition?(definition)
+      definition.valid? && !definition.group? && !definition.image? &&
+        (!definition.respond_to?(:live_component?) || !definition.live_component?) &&
+        definition.count_used_instances == 0 && definition.instances.empty?
+    end
+
+    def remove_unused_definitions(ids)
+      fresh_report
+      keys = Array(ids).map(&:to_s).uniq
+      raise ArgumentError, 'Выберите неиспользуемые определения' if keys.empty?
+      references = @cleanup_references || {}
+      current = model.definitions.to_a
+      definitions = keys.map { |id| references[id] }
+      unless definitions.all? { |definition| definition && current.include?(definition) && unused_definition?(definition) }
+        raise ArgumentError, 'Состав модели изменился. Повторите анализ перед очисткой'
+      end
+      model.start_operation('Удалить неиспользуемые определения', true)
+      begin
+        definitions.each { |definition| raise 'SketchUp не удалил определение' unless model.definitions.remove(definition) }
+        model.commit_operation
+      rescue StandardError
+        model.abort_operation
+        raise
+      end
+      invalidate_report("Удалено определений: #{definitions.length}. Используйте Undo для отмены.")
     end
 
     def actions_for(ids, catalogs: @catalogs)
@@ -942,6 +1014,25 @@ module MafLibrary
     def create_section(name)
       section = @settings.add_section(name)
       refresh_catalog("Создан раздел «#{section}».")
+    end
+
+    def delete_section(name)
+      raise ArgumentError, 'Раздел «Другое» удалить нельзя' if name == 'Другое'
+      raise ArgumentError, 'Раздел не найден' unless @settings.sections.include?(name)
+      used_in_model = model.definitions.to_a.any? { |definition| definition.get_attribute(Analyzer::DICTIONARY, 'category') == name }
+      used_in_catalog = @catalogs.entries.any? { |entry| entry['category'] == name }
+      used_in_cloud = cloud && cloud.entries.any? { |entry| entry['category'] == name }
+      raise ArgumentError, 'Раздел используется моделями проекта или библиотек. Сначала перенесите модели в другой раздел' if used_in_model || used_in_catalog || used_in_cloud
+      @settings.remove_section(name)
+      refresh_catalog("Удалён раздел «#{name}».")
+    end
+
+    def change_catalog_section(id, scope, section)
+      raise ArgumentError, 'Облачная библиотека доступна только для чтения' unless Settings::SCOPES.include?(scope)
+      raise ArgumentError, 'Раздел не найден' unless @settings.sections.include?(section)
+      @catalogs.catalog(scope).assign_section(id, section)
+      mark_report_stale
+      refresh_catalog("Раздел карточки изменён на «#{section}».")
     end
 
     def choose_library_path(scope)

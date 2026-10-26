@@ -36,7 +36,9 @@ module MafLibrary
     end
 
     def sections
-      DEFAULT_SECTIONS + Array(data['sections']).reject { |name| DEFAULT_SECTIONS.include?(name) }
+      current = data
+      defaults = DEFAULT_SECTIONS - Array(current['hidden_default_sections'])
+      defaults + Array(current['sections']).reject { |name| DEFAULT_SECTIONS.include?(name) }
     end
 
     def add_section(name)
@@ -44,10 +46,28 @@ module MafLibrary
       raise ArgumentError, 'Введите название раздела до 60 символов' if clean.empty? || clean.length > 60
       raise ArgumentError, 'Такой раздел уже существует' if sections.any? { |item| item.casecmp(clean).zero? }
       current = data
+      if DEFAULT_SECTIONS.include?(clean)
+        current['hidden_default_sections'] = Array(current['hidden_default_sections']) - [clean]
+        write(current)
+        return clean
+      end
       current['sections'] ||= []
       current['sections'] << clean
       write(current)
       clean
+    end
+
+    def remove_section(name)
+      raise ArgumentError, 'Раздел «Другое» необходим для моделей без категории' if name == 'Другое'
+      raise ArgumentError, 'Раздел не найден' unless sections.include?(name)
+      current = data
+      if DEFAULT_SECTIONS.include?(name)
+        current['hidden_default_sections'] = (Array(current['hidden_default_sections']) + [name]).uniq
+      else
+        current['sections'] = Array(current['sections']) - [name]
+      end
+      write(current)
+      name
     end
 
     def cloud_url
