@@ -20,12 +20,31 @@ module MafLibrary
     end
 
     def entries
+      stored_entries.reject { |entry| entry['removed_at'] }
+    end
+
+    # Retain assets and metadata in place; removal never destroys the SKP.
+    def removed_entries
+      stored_entries.select { |entry| entry['removed_at'] }
+    end
+
+    def remove(id)
+      items = entries
+      entry = items.find { |item| item['id'] == id }
+      raise ArgumentError, 'Модель не найдена в каталоге' unless entry
+      entry['removed_at'] = Time.now.utc.iso8601
+      save(items)
+      entry
+    end
+
+    def stored_entries
       path = File.file?(manifest_path) ? manifest_path : "#{manifest_path}.bak"
       return [] unless File.file?(path)
       data = JSON.parse(File.read(path, encoding: 'UTF-8'))
       raise 'Некорректный каталог МАФ' unless data.is_a?(Array)
       data
     end
+    private :stored_entries
 
     def import(source, name:, category:, instance_export: false)
       raise ArgumentError, 'Выберите существующий файл .skp' unless File.file?(source) && File.extname(source).downcase == '.skp'
@@ -189,6 +208,7 @@ module MafLibrary
       inbox = File.join(root, 'inbox')
       FileUtils.mkdir_p(inbox)
       items = entries
+      removed = removed_entries
       added = updated = 0
       Dir.glob(File.join(inbox, '**', '*')).sort.each do |source|
         next unless File.file?(source) && File.extname(source).casecmp?('.skp')
@@ -197,6 +217,7 @@ module MafLibrary
         relative = real.delete_prefix(File.realpath(inbox) + File::SEPARATOR).tr('\\', '/')
         category = relative.include?('/') ? relative.split('/').first : 'Другое'
         sha = Digest::SHA256.file(real).hexdigest
+        next if removed.any? { |item| item['inbox_path'] == relative || item['sha256'] == sha }
         entry = items.find { |item| item['inbox_path'] == relative } ||
                 items.find { |item| item['sha256'] == sha }
         if entry
@@ -328,6 +349,8 @@ module MafLibrary
     end
 
     def save(items)
+      retained = removed_entries.reject { |entry| items.any? { |item| item['id'] == entry['id'] } }
+      items = items + retained
       FileUtils.mkdir_p(root)
       temporary = "#{manifest_path}.tmp"
       backup = "#{manifest_path}.bak"

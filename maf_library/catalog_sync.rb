@@ -165,6 +165,19 @@ module MafLibrary
       validate_definition(definition)
       entry = linked_entry(definition) || recovered_entry(definition)
       fingerprint = complete_fingerprint(row)
+      unless entry
+        @removed_cards ||= WRITABLE_SCOPES.flat_map do |scope|
+          @catalogs.catalog(scope).removed_entries.map { |item| item.merge('scope' => scope) }
+        end
+        recovered = @recovery_store.recover(definition)
+        removed = @removed_cards.any? do |item|
+          (definition.get_attribute(DICTIONARY, 'catalog_scope') == item['scope'] &&
+            definition.get_attribute(DICTIONARY, 'catalog_id') == item['id']) ||
+            (recovered && recovered[:scope] == item['scope'] && recovered[:id] == item['id']) ||
+            (fingerprint && item['recognition_fingerprint'] == fingerprint)
+        end
+        return if removed
+      end
       entry ||= exact_entry(fingerprint)
       created = entry.nil?
       if created

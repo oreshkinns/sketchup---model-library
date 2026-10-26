@@ -219,6 +219,9 @@ module MafLibrary
       end
       @dialog.add_action_callback('import_model') { |_context, scope| safely { import_model(scope.to_s) } }
       @dialog.add_action_callback('place_model') { |_context, id| safely { place_model(id.to_s) } }
+      @dialog.add_action_callback('delete_catalog_model') do |_context, id, scope|
+        safely { delete_catalog_model(id.to_s, scope.to_s) }
+      end
       @dialog.add_action_callback('replace_duplicates') do |_context, group_id, target_id|
         safely { replace_duplicates(group_id.to_s, target_id.to_s) }
       end
@@ -623,6 +626,13 @@ module MafLibrary
         raise 'Модель не найдена'
       end
       refresh_catalog('Данные модели сохранены.')
+    end
+
+    def delete_catalog_model(id, scope)
+      raise ArgumentError, 'Облачная библиотека доступна только для чтения' unless Settings::SCOPES.include?(scope)
+      @catalogs.catalog(scope).remove(id)
+      mark_report_stale
+      refresh_catalog('Модель удалена из библиотеки. Размещения в проекте и файл .skp сохранены.')
     end
 
     def scan_catalog(scope)

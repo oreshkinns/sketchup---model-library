@@ -111,6 +111,50 @@ assert.equal(await p.locator('#add-selected').textContent(),'Добавить в
 assert.match(await p.locator('#import').textContent(),/Добавить файл .skp/);
 });
 
+test('gallery fits the automatic and minimum windows with models visible immediately',async t=>{
+  const data=fixture();data.catalog_sync_errors=[];
+  data.catalog=Array.from({length:8},(_,i)=>({...data.catalog[0],id:`gallery-${i}`,name:`Скамья ${i}`}));
+  const p=await open(t,data);
+  for(const [width,height] of [[1120,720],[620,410]]){
+    await p.setViewportSize({width,height});
+    const layout=await p.evaluate(()=>{
+      const nav=document.querySelector('.nav').getBoundingClientRect(),search=document.querySelector('#search').getBoundingClientRect(),cards=[...document.querySelectorAll('.catalog-card')].map(e=>e.getBoundingClientRect());
+      return {overflow:document.documentElement.scrollWidth>innerWidth,navTop:nav.top,searchTop:search.top,cardTop:cards[0].top,columns:cards.filter(c=>Math.abs(c.top-cards[0].top)<1).length,overlap:cards.some(c=>c.top>cards[0].top+1&&c.top<cards[0].bottom),viewport:innerHeight};
+    });
+    assert.equal(layout.overflow,false);
+    assert.equal(layout.overlap,false,'Gallery rows must not overlap when the window is short');
+    assert.ok(layout.navTop<layout.searchTop,'Navigation belongs above the search');
+    assert.ok(layout.cardTop<layout.viewport-100,'Models are visible without scrolling past toolbars');
+    assert.equal(layout.columns,width===1120?4:2);
+  }
+});
+
+test('library deletion confirms exact scope, supports cancel, and excludes cloud cards',async t=>{
+  const data=fixture();data.catalog.push({id:'cloud-item',scope:'cloud',name:'Облачная скамья'});
+  const p=await open(t,data);
+  const personal=p.locator('[data-card-key="personal:same"]');
+  await personal.locator('summary').filter({hasText:'Подробнее'}).click();
+  await personal.locator('[data-delete-catalog]').click();
+  assert.match(await p.locator('#modal-description').textContent(),/Скамья.*Личная/s);
+  assert.match(await p.locator('#modal-description').textContent(),/останутся/s);
+  await p.locator('#cancel').click();
+  assert.equal((await calls(p,'delete_catalog_model')).length,0);
+  await personal.locator('[data-delete-catalog]').click();
+  await p.locator('#confirm').click();
+  assert.deepEqual((await calls(p,'delete_catalog_model')).at(-1),['delete_catalog_model','same','personal']);
+  assert.equal(await p.locator('[data-card-key="cloud:cloud-item"] [data-delete-catalog]').count(),0);
+});
+
+test('gallery add menu keeps destination and all three import actions reachable',async t=>{
+  const p=await open(t);
+  await p.locator('#catalog-add-menu summary').click();
+  await p.locator('#import-scope').selectOption('shared');
+  await p.locator('#add-selected').click();
+  assert.deepEqual((await calls(p,'add_selected_to_library')).at(-1),['add_selected_to_library','shared']);
+  await p.keyboard.press('Escape');
+  assert.equal(await p.locator('#catalog-add-menu').getAttribute('open'),null);
+});
+
 test('opening the panel never starts a scan and manual start exposes Stop',async t=>{
 const p=await open(t);
 assert.deepEqual((await calls(p,'ready')).length,1);
@@ -279,6 +323,7 @@ await p.locator('#selected-menu').click();
 await p.locator('[data-action="delete"]').click();
 assert.match(await p.locator('#action-scope').textContent(),/со всеми размещениями.*3.*Двор \/ 1.*Парк \/ 1/s);
 await p.locator('#cancel').click();
+await p.locator('#project-tools summary').click();
 await p.locator('#replace-selected').click();
 assert.equal(await p.locator('#confirm').isDisabled(),true);
 const c=(await calls(p,'preview_replace_rows')).at(-1);
@@ -287,6 +332,7 @@ assert.equal(await p.locator('#confirm').isEnabled(),true);
 });
 test('direct selection needs no scan; existing card opens; explicit copy uses separate callback',async t=>{
 const p=await open(t,{models:[],catalog:fixture().catalog,sections:['Скамейки'],summary:{}});
+await p.locator('#catalog-add-menu summary').click();
 await p.locator('#add-selected').click();
 assert.deepEqual((await calls(p,'add_selected_to_library')).at(-1),['add_selected_to_library','personal']);
 assert.equal((await calls(p,'scan')).length,0);
@@ -305,6 +351,7 @@ const p=await open(t);
 assert.match(await p.locator('#catalog-sync-errors').textContent(),/Нет доступа к папке/);
 await p.locator('#retry-catalog-sync').click();
 assert.equal((await calls(p,'retry_catalog_sync')).length,1);
+await p.locator('[data-card-key="personal:same"] > details > summary').click();
 await p.locator('[data-card-key="personal:same"] [data-update-version]').click();
 assert.match(await p.locator('#modal-description').textContent(),/новую версию/);
 await p.locator('#confirm').click();
@@ -416,7 +463,8 @@ test('review: replacement previews and submission bind the same original targets
   const p = await open(t, data);
   await p.locator('.nav [data-page="overview"]').click();
   await p.locator('[data-node="yard/1"]').click();
-  await p.locator('#replace-selected').click();
+  await p.locator('#project-tools summary').click();
+await p.locator('#replace-selected').click();
   await p.evaluate(() => MAF.receive({selected_rows:['definition:3']}));
   await p.locator('#modal-select').selectOption('target-b');
   const previews = await calls(p, 'preview_replace_rows');
@@ -484,6 +532,7 @@ test('CEF64: startup and model actions work without Array flatMap', async t => {
   assert.equal(await p.locator('#catalog').isVisible(), true);
   assert.equal((await calls(p, 'ready')).length, 1);
   assert.equal(await p.locator('[data-card-key="personal:same"] [data-placement-count]').textContent(), 'В текущем проекте: 5 размещений');
+  await p.locator('[data-card-key="personal:same"] > details > summary').click();
   await p.locator('[data-update-version="same"]').first().click();
   assert.equal(await p.locator('#modal-select option').count(), 2);
   await p.locator('#cancel').click();
