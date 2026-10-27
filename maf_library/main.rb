@@ -8,6 +8,7 @@ require_relative 'settings'
 require_relative 'catalog_manager'
 require_relative 'cloud_catalog'
 require_relative 'analyzer'
+require_relative 'duplicate_views'
 require_relative 'model_recognition'
 require_relative 'catalog_sync'
 require_relative 'replacement'
@@ -425,6 +426,11 @@ module MafLibrary
           job[:report] = job[:session].result
           prepare_scan_cards(job)
         end
+      when :duplicate_views
+        if job[:session].step(max_items: SCAN_ENTITY_BUDGET, deadline: deadline)
+          job[:report] = job[:session].result
+          prepare_catalog_cards(job)
+        end
       when :cards
         advance_scan_cards(job, deadline)
       when :cleanup
@@ -439,6 +445,11 @@ module MafLibrary
 
     def prepare_scan_cards(job)
       job[:report]['catalog_sync_errors'] = job[:sync_result][:errors]
+      job[:session] = DuplicateViews.new(job[:report]).start
+      job[:phase] = :duplicate_views
+    end
+
+    def prepare_catalog_cards(job)
       job[:local_entries] = @catalogs.entries
       source = cloud
       job[:remote_entries] = source ? source.entries : []
@@ -504,7 +515,7 @@ module MafLibrary
       @refreshing = false
       @scan_job = nil
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - job[:started_at]
-      data = report.reject { |key, _value| key == 'references' }
+      data = report.reject { |key, _value| key == 'references' || key == 'structural_references' }
       data['catalog'] = job[:cards]
       data['sections'] = @settings.sections
       data['settings'] = @settings.paths.merge('cloud_url' => @settings.cloud_url)
@@ -740,8 +751,13 @@ module MafLibrary
     def focus_duplicates(ids)
       report = fresh_report
       keys = Array(ids).map(&:to_s).uniq
-      allowed = report['duplicates'].flat_map { |group| group['definitions'].map { |item| item['id'] } }
+      groups = duplicate_groups(report)
+      allowed = groups.flat_map { |group| group['definitions'].map { |item| item['id'] } }
       raise 'Выберите модели из списка дублей' if keys.empty? || (keys - allowed).any?
+      unsafe_ids = groups.select { |group| group['scope_conflict'] }.flat_map do |group|
+        group['scope_conflict_ids'] || group['definitions'].map { |item| item['id'] }
+      end
+      raise 'Модель используется в других местах. Фокусировка по отдельной области недоступна' if (keys & unsafe_ids).any?
       validate_report_definitions(report, keys)
       @syncing_selection = true
       count = ProjectActions.new(model, report, @catalogs).focus_definitions(keys)
@@ -754,7 +770,7 @@ module MafLibrary
     def duplicate_previews(group_id, ids, token)
       report = fresh_report
       keys = Array(ids).map(&:to_s).uniq
-      group = report.fetch('duplicates').find do |candidate|
+      group = duplicate_groups(report).find do |candidate|
         candidate['id'].to_s == group_id && candidate['definitions'].map { |item| item['id'].to_s }.sort == keys.sort
       end
       raise ArgumentError, 'Группа дублей изменилась. Повторите анализ' unless group && keys.length <= 30
@@ -773,6 +789,10 @@ module MafLibrary
         end
       end
       push(duplicate_previews: {group_id: group_id, ids: keys, images: images, token: token})
+    end
+
+    def duplicate_groups(report)
+      Array(report['duplicates']) + Array(report['nested_duplicates'])
     end
 
     def unused_definition?(definition)
@@ -936,10 +956,10 @@ module MafLibrary
     def preview_replace_duplicates(group_id, target_id, token)
       raise 'Модель изменилась. Запустите анализ повторно' unless @last_report && @last_model == model
       raise 'Отчет устарел после изменения модели. Запустите анализ повторно' if @report_stale
-      old_group = @last_report['duplicates'].find { |group| group['id'] == group_id }
+      old_group = duplicate_groups(@last_report).find { |group| group['id'] == group_id }
       raise 'Группа дублей больше не найдена. Запустите анализ повторно' unless old_group
       current = fresh_report
-      group = current['duplicates'].find { |item| item['id'] == group_id }
+      group = duplicate_groups(current).find { |item| item['id'] == group_id }
       raise 'Состав дублей изменился. Запустите анализ повторно' unless group && group['definitions'] == old_group['definitions']
       validate_report_definitions(current, group['definitions'].map { |item| item['id'] })
       raise 'Совпадение не подтверждено полным анализом. Замена недоступна' unless group['replaceable'] && old_group['replaceable']
@@ -1248,10 +1268,10 @@ module MafLibrary
     def replace_duplicates(group_id, target_id)
       raise 'Модель изменилась. Запустите анализ повторно' unless @last_model == model && @last_report
       raise 'Отчет устарел после изменения модели. Запустите анализ повторно' if @report_stale
-      old_group = @last_report['duplicates'].find { |group| group['id'] == group_id }
+      old_group = duplicate_groups(@last_report).find { |group| group['id'] == group_id }
       raise 'Группа дублей больше не найдена. Запустите анализ повторно' unless old_group
       current_report = fresh_report
-      group = current_report['duplicates'].find { |item| item['id'] == group_id }
+      group = duplicate_groups(current_report).find { |item| item['id'] == group_id }
       raise 'Состав дублей изменился. Запустите анализ повторно' unless group && group['definitions'] == old_group['definitions']
       validate_report_definitions(current_report, group['definitions'].map { |item| item['id'] })
       raise 'Совпадение не подтверждено полным анализом. Объединение недоступно' unless group['replaceable'] && old_group['replaceable']

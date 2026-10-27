@@ -34,6 +34,34 @@ return page;
 async function calls(page,name){return page.evaluate(name=>window.calls.filter(x=>x[0]===name),name);
 }
 
+test('duplicates open on whole MAFs and nested matches are separated by parent',async t=>{
+  const data=fixture();
+  data.duplicates=[{id:'whole',label:'Качели 1',classification:'confirmed',replaceable:true,definitions:[{id:'1',name:'Качели 1',instances:1},{id:'2',name:'Качели 2',instances:1}]}];
+  data.nested_duplicates=[{id:'part',label:'Болт',owner_id:'1',owner_name:'Качели 1',classification:'confirmed',replaceable:true,definitions:[{id:'3',name:'Болт 1',instances:1},{id:'4',name:'Болт 2',instances:1}]},{id:'part2',label:'Крепление',owner_id:'2',owner_name:'Качели 2',classification:'candidate',replaceable:false,definitions:[{id:'7',name:'Крепление 1',instances:1},{id:'8',name:'Крепление 2',instances:1}]}];
+  const p=await open(t,data);
+  await p.locator('.nav [data-page="duplicates"]').click();
+  assert.match(await p.locator('#duplicates-list').textContent(),/Качели 1/);
+  assert.doesNotMatch(await p.locator('#duplicates-list').textContent(),/Болт/);
+  assert.equal(await p.locator('#nav-duplicates').textContent(),'1');
+  await p.locator('[data-duplicate-scope="nested"]').click();
+  await p.locator('#duplicate-owner').selectOption('1');
+  assert.match(await p.locator('#duplicates-list').textContent(),/Болт/);
+  assert.match(await p.locator('#duplicates-list').textContent(),/Качели 1/);
+  assert.doesNotMatch(await p.locator('#duplicates-list').textContent(),/Качели 2/);
+  await p.locator('[data-duplicate-scope="whole"]').click();
+  assert.match(await p.locator('#duplicates-list').textContent(),/Качели 2/);
+});
+
+test('mixed-scope duplicates cannot focus or replace all uses accidentally',async t=>{
+  const data=fixture();data.duplicates=[{id:'mixed',label:'МАФ',scope_conflict:true,classification:'confirmed',replaceable:false,reasons:['Используется в других местах'],definitions:[{id:'1',name:'МАФ 1',instances:1},{id:'2',name:'МАФ 2',instances:1}]}];
+  const p=await open(t,data);
+  await p.locator('.nav [data-page="duplicates"]').click();
+  assert.equal(await p.locator('[data-duplicate-choice]').first().isDisabled(),true);
+  assert.equal(await p.locator('[data-focus-duplicate]').isDisabled(),true);
+  assert.equal(await p.locator('[data-duplicate="mixed"]').isDisabled(),true);
+  assert.match(await p.locator('#duplicates-list').textContent(),/других местах/);
+});
+
 test('library switches between list and different card sizes',async t=>{
   const p=await open(t);
   await p.locator('[data-catalog-layout="list"]').click();

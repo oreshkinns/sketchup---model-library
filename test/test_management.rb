@@ -29,6 +29,18 @@ class ManagementDefinitionList < Array
 end
 
 class ControllerRecognitionTest
+  def test_focus_rejects_definition_used_in_other_duplicate_scopes
+    id = @definition.object_id.to_s
+    report = {'duplicates' => [{'scope_conflict' => true, 'scope_conflict_ids' => [id], 'definitions' => [{'id' => id}]}],
+      'nested_duplicates' => [], 'references' => {}}
+    @controller.instance_variable_set(:@last_model, @model)
+    @controller.instance_variable_set(:@last_report, report)
+    @controller.instance_variable_set(:@report_stale, false)
+    error = assert_raises(RuntimeError) { @controller.send(:focus_duplicates, [id]) }
+    assert_match(/других местах/, error.message)
+    assert_empty @model.selection
+  end
+
   def test_focusing_duplicates_rejects_stale_report
     @controller.instance_variable_set(:@last_model, @model)
     @controller.instance_variable_set(:@last_report, {'duplicates' => [{'definitions' => [{'id' => '1'}]}]})

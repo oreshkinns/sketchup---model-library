@@ -16,6 +16,7 @@ module MafLibrary
     def initialize(model)
       @model = model
       @definitions = {}
+      @structural_definitions = {}
       @signature_cache = {}
       @signature_sampled = {}
       @signature_complete = {}
@@ -31,6 +32,7 @@ module MafLibrary
     def start_scan
       @duplicate_signature = DefinitionSignature.new(mode: :duplicate)
       @definitions = {}
+      @structural_definitions = {}
       @signature_cache = {}
       @signature_sampled = {}
       @signature_complete = {}
@@ -378,7 +380,7 @@ module MafLibrary
        'models' => rows, 'duplicates' => groups, 'hierarchy' => hierarchy_nodes(hierarchy),
        'definitions' => @definitions.values.map { |item| {'id' => item[:definition].object_id.to_s,
          'name' => item[:name], 'kind' => item[:kind], 'instances' => item[:placements]} }.sort_by { |item| item['name'] },
-       'references' => @definitions}
+       'references' => @definitions, 'structural_references' => @structural_definitions}
     end
 
     def inventory_entity(entity, frame)
@@ -398,6 +400,17 @@ module MafLibrary
         'instances' => 0, 'children' => {}})
       node['instances'] += 1
       if structural
+        item = (@structural_definitions[id] ||= {definition: definition, kind: kind, placements: 0, refs: {}, name: name})
+        item[:placements] += 1
+        reference = (item[:refs][entity.object_id] ||= {entity: entity, ancestors: ancestors, locked: false, paths: [], hidden_tags: []})
+        reference[:locked] ||= frame.inherited_lock || entity.locked?
+        reference[:ancestors] |= ancestors
+        path_key = full_path.map(&:object_id)
+        seen_paths = (@seen_paths[entity.object_id] ||= {})
+        unless seen_paths.key?(path_key)
+          seen_paths[path_key] = true
+          reference[:paths] << full_path
+        end
         return if ancestors.include?(id)
         return [definition.entities, 0, ancestors + [id], frame.inherited_lock || entity.locked?, full_path,
                 node['children'], node['id']]
