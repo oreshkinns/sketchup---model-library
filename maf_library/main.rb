@@ -12,6 +12,7 @@ require_relative 'duplicate_views'
 require_relative 'model_recognition'
 require_relative 'catalog_sync'
 require_relative 'replacement'
+require_relative 'nested_merge'
 require_relative 'replacement_preview'
 require_relative 'project_actions'
 require_relative 'updater'
@@ -233,6 +234,17 @@ module MafLibrary
       end
       @dialog.add_action_callback('replace_duplicates') do |_context, group_id, target_id|
         safely { replace_duplicates(group_id.to_s, target_id.to_s) }
+      end
+      @dialog.add_action_callback('preview_nested_merge') do |_context, owner_id, token|
+        begin
+          preview_nested_merge(owner_id.to_s, token.to_s)
+        rescue StandardError => error
+          @nested_merge_confirmation = nil
+          push(nested_merge_preview: {token: token.to_s, owner_id: owner_id.to_s, error: error.message}, message: error.message, error: true)
+        end
+      end
+      @dialog.add_action_callback('merge_nested_duplicates') do |_context, owner_id, token|
+        safely { merge_nested_duplicates(owner_id.to_s, token.to_s) }
       end
       @dialog.add_action_callback('replace_selected') { |_context| safely { replace_selected } }
       @dialog.add_action_callback('add_rows_to_library') do |_context, ids, scope|
@@ -951,6 +963,26 @@ module MafLibrary
       current, sources, target, _replacement, plan = row_replacement_plan(ids, target_id)
       refs = sources.flat_map { |source| current['references'].fetch(source.object_id)[:refs].values }
       push(replacement_preview: {'token' => token, 'plan' => ReplacementPreview.payload(plan, refs)})
+    end
+
+    def preview_nested_merge(owner_id, token)
+      @nested_merge_confirmation = nil
+      raise ArgumentError, 'Пустой токен предпросмотра' if token.empty?
+      report = fresh_report
+      plan = NestedMerge.new(model, report, owner_id).plan
+      @nested_merge_confirmation = {owner_id: owner_id, token: token, fingerprint: plan[:fingerprint], report: report}
+      push(nested_merge_preview: plan[:summary].merge(token: token))
+    end
+
+    def merge_nested_duplicates(owner_id, token)
+      confirmation = @nested_merge_confirmation
+      @nested_merge_confirmation = nil
+      report = fresh_report
+      unless confirmation && confirmation[:owner_id] == owner_id && confirmation[:token] == token && confirmation[:report].equal?(report)
+        raise 'Откройте предпросмотр объединения повторно'
+      end
+      result = NestedMerge.new(model, report, owner_id).apply(confirmation[:fingerprint])
+      invalidate_report("Объединено определений: #{result[:definitions]}, затронуто размещений: #{result[:placements]}. Используйте Undo для отмены.")
     end
 
     def preview_replace_duplicates(group_id, target_id, token)

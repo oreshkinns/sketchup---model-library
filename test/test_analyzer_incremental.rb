@@ -117,4 +117,18 @@ class AnalyzerIncrementalTest < Minitest::Test
     refute session.step(max_entities: 5)
     refute session.done?
   end
+
+  def test_exact_matched_definitions_retain_candidate_hints_in_bounded_steps
+    definitions = 2.times.map { |index| FakeDefinition.new("Copy #{index}", IndexedEntities.new(Array.new(40) { FakeEdge.new })) }
+    session = MafLibrary::Analyzer.new(FakeModel.new(definitions.map { |definition| Sketchup::ComponentInstance.new(definition) })).start_scan
+    1_000.times { session.step(max_entities: 1); break if session.phase == :candidate_hints }
+    assert_equal :candidate_hints, session.phase
+    reads = definitions.sum { |definition| definition.entities.indexed_reads.to_i }
+    refute session.step(max_entities: 5)
+    assert_operator definitions.sum { |definition| definition.entities.indexed_reads.to_i } - reads, :<=, 5
+    1_000.times { break if session.step(max_entities: 1) }
+    assert session.done?
+    definitions.each { |definition| refute_empty session.result['references'].fetch(definition.object_id).fetch(:candidate_hints) }
+    assert_equal 'confirmed', session.result['duplicates'].first['classification']
+  end
 end

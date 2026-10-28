@@ -116,4 +116,94 @@ class DuplicateViewsTest < Minitest::Test
     assert_equal 'confirmed', group['classification']
     assert_equal true, group['replaceable']
   end
+
+  def test_other_parent_exact_copy_cannot_hide_within_parent_candidate
+    first = FakeDefinition.new('Bolt A', [FakeEdge.new])
+    candidate = FakeDefinition.new('Bolt C', [FakeEdge.new], {['MafLibrary', 'category'] => 'Other'})
+    parent = FakeDefinition.new('MAF 1', [Sketchup::ComponentInstance.new(first), Sketchup::ComponentInstance.new(candidate)],
+      {['MafLibrary', 'maf_decision'] => 'confirmed'})
+    roots = [Sketchup::ComponentInstance.new(parent)]
+    results = [false, true].map do |outside_copy|
+      if outside_copy
+        copy = FakeDefinition.new('Bolt B', [FakeEdge.new])
+        other = FakeDefinition.new('MAF 2', [Sketchup::ComponentInstance.new(copy)],
+          {['MafLibrary', 'maf_decision'] => 'confirmed'})
+        roots << Sketchup::ComponentInstance.new(other)
+      end
+      report = MafLibrary::Analyzer.new(FakeModel.new(roots)).scan
+      MafLibrary::ModelRecognition.new(report, catalog_entries: []).apply
+      session = MafLibrary::DuplicateViews.new(report).start
+      5_000.times { break if session.step(max_items: 1) }
+      assert session.done?
+      matches = report['nested_duplicates'].select { |group| group['owner_id'] == parent.object_id.to_s }
+      assert_equal 1, matches.length
+      match = matches.first
+      assert_equal ['Bolt A', 'Bolt C'], match['definitions'].map { |entry| entry['name'] }.sort
+      assert_equal 'candidate', match['classification']
+      refute match['replaceable']
+      match
+    end
+    refute results.first['scope_conflict']
+    refute results.last['scope_conflict']
+    assert_equal results.first['definitions'], results.last['definitions']
+  end
+
+  def test_other_parent_cannot_bridge_unrelated_local_candidates
+    first = FakeDefinition.new('Shared', [FakeEdge.new], {['MafLibrary', 'category'] => 'A'})
+    second = FakeDefinition.new('Other', [FakeEdge.new, FakeEdge.new], {['MafLibrary', 'category'] => 'B'})
+    bridge = FakeDefinition.new('Shared', [FakeEdge.new, FakeEdge.new], {['MafLibrary', 'category'] => 'C'})
+    parents = [[first, second], [bridge]].map.with_index do |parts, index|
+      FakeDefinition.new("MAF #{index}", parts.map { |part| Sketchup::ComponentInstance.new(part) },
+        {['MafLibrary', 'maf_decision'] => 'confirmed'})
+    end
+    report = MafLibrary::Analyzer.new(FakeModel.new(parents.map { |parent| Sketchup::ComponentInstance.new(parent) })).scan
+    assert report['duplicates'].any? { |group| group['definitions'].map { |entry| entry['id'] }.sort == [first, second, bridge].map { |part| part.object_id.to_s }.sort }
+    MafLibrary::ModelRecognition.new(report, catalog_entries: []).apply
+    session = MafLibrary::DuplicateViews.new(report).start
+    5_000.times { break if session.step(max_items: 1) }
+    assert session.done?
+    assert_empty report['nested_duplicates']
+  end
+
+  def test_scoped_exact_matches_stay_confirmed_and_shared_candidates_stay_blocked
+    first = FakeDefinition.new('Bolt A', [FakeEdge.new])
+    copy = FakeDefinition.new('Bolt B', [FakeEdge.new])
+    candidate = FakeDefinition.new('Bolt C', [FakeEdge.new], {['MafLibrary', 'category'] => 'Other'})
+    parents = [[first, candidate], [first, copy]].map.with_index do |parts, index|
+      FakeDefinition.new("MAF #{index}", parts.map { |part| Sketchup::ComponentInstance.new(part) },
+        {['MafLibrary', 'maf_decision'] => 'confirmed'})
+    end
+    report = MafLibrary::Analyzer.new(FakeModel.new(parents.map { |parent| Sketchup::ComponentInstance.new(parent) })).scan
+    MafLibrary::ModelRecognition.new(report, catalog_entries: []).apply
+    session = MafLibrary::DuplicateViews.new(report).start
+    5_000.times { break if session.step(max_items: 1) }
+    assert session.done?
+    matches = report['nested_duplicates'].to_h { |group| [group['owner_id'], group] }
+    candidate_match = matches.fetch(parents[0].object_id.to_s)
+    assert_equal 'candidate', candidate_match['classification']
+    assert_equal [first.object_id.to_s], candidate_match['scope_conflict_ids']
+    refute candidate_match['replaceable']
+    exact_match = matches.fetch(parents[1].object_id.to_s)
+    assert_equal 'confirmed', exact_match['classification']
+    assert_equal [first.object_id.to_s], exact_match['scope_conflict_ids']
+    refute exact_match['replaceable']
+    assert_equal [first, copy].map { |part| part.object_id.to_s }.sort,
+      exact_match['definitions'].map { |entry| entry['id'] }.sort
+  end
+
+  def test_scoped_hint_candidates_keep_sampling_warning
+    parts = [97, 98].map { |count| FakeDefinition.new('Bolt', Array.new(count) { FakeEdge.new }) }
+    parent = FakeDefinition.new('MAF', parts.map { |part| Sketchup::ComponentInstance.new(part) },
+      {['MafLibrary', 'maf_decision'] => 'confirmed'})
+    report = MafLibrary::Analyzer.new(FakeModel.new([Sketchup::ComponentInstance.new(parent)])).scan
+    MafLibrary::ModelRecognition.new(report, catalog_entries: []).apply
+    session = MafLibrary::DuplicateViews.new(report).start
+    5_000.times { break if session.step(max_items: 1) }
+    assert session.done?
+    match = report['nested_duplicates'].fetch(0)
+    assert_equal 'candidate', match['classification']
+    refute match['replaceable']
+    assert_match(/выбороч/, match['confidence'])
+    assert_match(/выборку/, match['reasons'].join)
+  end
 end

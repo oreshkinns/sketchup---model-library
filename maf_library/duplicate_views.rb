@@ -31,6 +31,10 @@ module MafLibrary
         @groups = Array(report['duplicates']).dup
         @group_index = 0
         @results = []
+        @candidate_scopes = Hash.new { |hash, key| hash[key] = Hash.new(0) }
+        @scope_matched = Hash.new { |hash, key| hash[key] = {} }
+        @candidate_states = {}
+        @candidate_components = Hash.new { |hash, key| hash[key] = [] }
         @done = false
       end
 
@@ -59,9 +63,11 @@ module MafLibrary
                 counts = (@parts[id][owner] ||= 0)
                 @parts[id][owner] = counts + node['instances'].to_i
                 @structural_ids[id] = true if group_record
+                record_candidate(id, 'nested', owner, node['instances'].to_i) unless group_record
               end
             elsif node['is_maf'] == true && node['row_id'] && !id.empty?
               @whole[id] += node['instances'].to_i
+              record_candidate(id, 'whole', nil, node['instances'].to_i)
               @owners[id] ||= node['name'].to_s
               next_owner = id
             end
@@ -115,8 +121,53 @@ module MafLibrary
             end
             @structural_groups_built = true
           elsif @group_index < @groups.length
-            @results.concat(split_group(@groups[@group_index]))
+            group = @groups[@group_index]
+            # Signature matches take precedence only within this scope. Link
+            # hints locally so other parents cannot hide or connect candidates.
+            unless group['hint_match']
+              split_group(group).each do |scoped|
+                @results << scoped
+                key = [scoped['scope'], scoped['owner_id'], scoped['kind']]
+                scoped['definitions'].each { |entry| @scope_matched[key][entry['id'].to_s] = true }
+              end
+            end
             @group_index += 1
+          elsif !@candidate_links_done
+            @candidate_iterator ||= candidate_entries
+            begin
+              key, id, _count = @candidate_iterator.next
+              link_candidate(key, id) unless @scope_matched[key][id]
+            rescue StopIteration
+              @candidate_links_done = true
+              @candidate_iterator = candidate_entries
+            end
+          elsif !@candidate_components_done
+            begin
+              key, id, count = @candidate_iterator.next
+              state = @candidate_states[key]
+              if state && state[:parents].key?(id)
+                @candidate_components[[key, candidate_root(state, id)]] << [state[:entries].fetch(id), count]
+              end
+            rescue StopIteration
+              @candidate_components_done = true
+              @candidate_iterator = @candidate_components.each
+            end
+          elsif !@candidate_groups_done
+            begin
+              (key, _root), members = @candidate_iterator.next
+              if members.length > 1
+                members.sort_by! { |entry, _count| [entry['name'], entry['id']] }
+                sampled = members.any? { |entry, _count| @report['references'].fetch(entry['id'].to_i)[:signature_sampled] }
+                group = {'id' => "hints:#{members.map { |entry, _count| entry['id'] }.join(',')}",
+                  'kind' => key.last, 'classification' => 'candidate', 'replaceable' => false,
+                  'confidence' => sampled ? 'Геометрия проверена выборочно · обязательно проверьте вручную' : 'Возможный дубль · проверить вручную',
+                  'reasons' => ['Совпадает имя или габариты; требуется полная проверка']}
+                group['reasons'] << 'Сигнатура содержит выборку; автоматическое объединение запрещено' if sampled
+                @results << scoped_group(group, key[0], key[1], members)
+              end
+            rescue StopIteration
+              @candidate_groups_done = true
+            end
           else
             unique = {}
             @results.each do |group|
@@ -139,6 +190,44 @@ module MafLibrary
 
       private
 
+      def record_candidate(id, scope, owner, count)
+        item = (@report['references'] || {})[id.to_i]
+        return unless item && item[:candidate_hints]
+        @candidate_scopes[[scope, owner, item[:kind]]][id] += count
+      end
+
+      def candidate_entries
+        Enumerator.new do |entries|
+          @candidate_scopes.each do |key, counts|
+            counts.each { |id, count| entries << [key, id, count] }
+          end
+        end
+      end
+
+      def link_candidate(key, id)
+        item = @report['references'].fetch(id.to_i)
+        state = (@candidate_states[key] ||= {parents: {}, hints: {}, entries: {}})
+        state[:parents][id] = id
+        state[:entries][id] = {'id' => id, 'name' => item[:name], 'instances' => item[:placements]}
+        item[:candidate_hints].each do |hint|
+          first = state[:hints][hint]
+          if first
+            state[:parents][candidate_root(state, id)] = candidate_root(state, first)
+          else
+            state[:hints][hint] = id
+          end
+        end
+      end
+
+      def candidate_root(state, id)
+        parents = state[:parents]
+        while parents[id] != id
+          parents[id] = parents[parents[id]]
+          id = parents[id]
+        end
+        id
+      end
+
       def split_group(group)
         bins = Hash.new { |hash, key| hash[key] = [] }
         Array(group['definitions']).each do |entry|
@@ -148,21 +237,25 @@ module MafLibrary
         end
         bins.filter_map do |(scope, owner), members|
           next if members.length < 2
-          entries = members.map { |entry, count| entry.merge('instances' => count) }
-          conflict_ids = members.filter_map { |entry, count| entry['id'].to_s if count != entry['instances'].to_i }
-          conflict = !conflict_ids.empty?
-          if group['parts_only']
-            exact = entries.all? { |entry| entry['exact_complete'] && entry['exact_signature'] } && entries.map { |entry| entry['exact_signature'] }.uniq.length == 1
-            group = group.merge('classification' => exact ? 'confirmed' : 'candidate', 'confidence' => exact ? 'Полная сигнатура совпадает' : 'Возможный дубль · проверить вручную')
-          end
-          reasons = Array(group['reasons']).dup
-          reasons << 'Определение используется в других местах; действия со всей моделью заблокированы' if conflict
-          group.merge('id' => Digest::SHA256.hexdigest(JSON.generate([group['id'], scope, owner, entries.map { |e| e['id'] }]))[0, 20],
-            'label' => entries.first['name'], 'scope' => scope, 'owner_id' => owner,
-            'owner_name' => owner && @owners[owner], 'scope_conflict' => conflict, 'scope_conflict_ids' => conflict_ids,
-            'replaceable' => group['replaceable'] == true && !conflict,
-            'reasons' => reasons, 'definitions' => entries)
+          scoped_group(group, scope, owner, members)
         end
+      end
+
+      def scoped_group(group, scope, owner, members)
+        entries = members.map { |entry, count| entry.merge('instances' => count) }
+        conflict_ids = members.filter_map { |entry, count| entry['id'].to_s if count != entry['instances'].to_i }
+        conflict = !conflict_ids.empty?
+        if group['parts_only']
+          exact = entries.all? { |entry| entry['exact_complete'] && entry['exact_signature'] } && entries.map { |entry| entry['exact_signature'] }.uniq.length == 1
+          group = group.merge('classification' => exact ? 'confirmed' : 'candidate', 'confidence' => exact ? 'Полная сигнатура совпадает' : 'Возможный дубль · проверить вручную')
+        end
+        reasons = Array(group['reasons']).dup
+        reasons << 'Определение используется в других местах; действия со всей моделью заблокированы' if conflict
+        group.merge('id' => Digest::SHA256.hexdigest(JSON.generate([group['id'], scope, owner, entries.map { |e| e['id'] }]))[0, 20],
+          'label' => entries.first['name'], 'scope' => scope, 'owner_id' => owner,
+          'owner_name' => owner && @owners[owner], 'scope_conflict' => conflict, 'scope_conflict_ids' => conflict_ids,
+          'replaceable' => group['replaceable'] == true && !conflict,
+          'reasons' => reasons, 'definitions' => entries)
       end
     end
   end

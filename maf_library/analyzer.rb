@@ -111,6 +111,7 @@ module MafLibrary
             budget -= @signature_session.processed
             return false unless completed
             item[:signature] = @analyzer.__send__(:store_signature, item[:definition], @signature_session.result)
+            item[:signature_sampled] = @signature_session.result[:sampled]
             @signature_session = nil
             if item[:signature] && !item[:definition].entities.length.zero?
               by_kind = (@signature_buckets[item[:signature]] ||= {})
@@ -122,6 +123,7 @@ module MafLibrary
           when :confirmed_groups
             if @bucket_index >= @confirmed_buckets.length
               @unmatched = []
+              @unmatched_indexes = {}
               @item_index = 0
               @phase = :unmatched
               next
@@ -148,18 +150,21 @@ module MafLibrary
               next
             end
             item = @items[@item_index]
-            @unmatched << item unless @matched_ids[item[:definition].object_id.to_s]
+            unless @matched_ids[item[:definition].object_id.to_s]
+              @unmatched_indexes[item[:definition].object_id] = @unmatched.length
+              @unmatched << item
+            end
             @item_index += 1
             budget -= 1
           when :candidate_hints
-            if @candidate_index >= @unmatched.length
+            if @candidate_index >= @items.length
               @candidate_components = Hash.new { |hash, key| hash[key] = [] }
               @candidate_component_index = 0
               @phase = :candidate_components
               next
             end
             if @candidate_entities.nil?
-              @candidate_entities = @unmatched[@candidate_index][:definition].entities
+              @candidate_entities = @items[@candidate_index][:definition].entities
               @candidate_counts = Hash.new(0)
               @candidate_entity_index = 0
               @candidate_failed = false
@@ -179,7 +184,8 @@ module MafLibrary
             end
             if @candidate_entity_index >= @candidate_entities.length
               token = @candidate_failed ? nil : [@candidate_entities.length, @candidate_counts.sort]
-              register_candidate_hints(@unmatched[@candidate_index], @candidate_index, token)
+              item = @items[@candidate_index]
+              register_candidate_hints(item, @unmatched_indexes[item[:definition].object_id], token)
               @candidate_index += 1
               @candidate_entities = nil
             end
@@ -202,7 +208,7 @@ module MafLibrary
             component = @candidate_component_values[@candidate_group_index]
             if component.length > 1
               @groups << @analyzer.__send__(:make_group, component, 'candidate', false,
-                ['Совпадает имя или габариты; требуется полная проверка'])
+                ['Совпадает имя или габариты; требуется полная проверка'], hint_match: true)
             end
             @candidate_group_index += 1
             budget -= 1
@@ -270,6 +276,10 @@ module MafLibrary
         hints << [kind, :name, name.downcase(:ascii)] unless name.empty?
         hints << [kind, :bounds, bounds] unless bounds.empty?
         hints << [kind, :structure, structure]
+        # Scoped matching needs evidence even when this definition matched an
+        # exact copy elsewhere. Global candidate classification stays unchanged.
+        item[:candidate_hints] = hints
+        return if index.nil?
         hints.each do |hint|
           first = @first_by_hint[hint]
           if first
@@ -536,12 +546,12 @@ module MafLibrary
       components = Hash.new { |hash, key| hash[key] = [] }
       unmatched.each_with_index { |item, index| components[find_root.call(index)] << item }
       components.each_value do |component|
-        groups << make_group(component, 'candidate', false, ['Совпадает имя или габариты; требуется полная проверка']) if component.length > 1
+        groups << make_group(component, 'candidate', false, ['Совпадает имя или габариты; требуется полная проверка'], hint_match: true) if component.length > 1
       end
       groups.sort_by { |group| [group['classification'] == 'confirmed' ? 0 : 1, group['label']] }
     end
 
-    def make_group(items, classification, replaceable, reasons)
+    def make_group(items, classification, replaceable, reasons, hint_match: false)
       sorted = items.sort_by { |item| [item[:name], item[:definition].object_id] }
       sampled = sorted.any? { |item| @signature_sampled[item[:definition].object_id] }
       catalog_match = sorted.all? do |item|
@@ -563,7 +573,9 @@ module MafLibrary
       {'id' => Digest::SHA256.hexdigest(JSON.generate(digest_key))[0, 16], 'kind' => sorted.first[:kind],
        'label' => sorted.first[:name], 'confidence' => confidence, 'classification' => classification,
        'replaceable' => actual_replaceable, 'reasons' => reason_list,
-       'definitions' => sorted.map { |item| {'id' => item[:definition].object_id.to_s, 'name' => item[:name], 'instances' => item[:placements]} }}
+       'definitions' => sorted.map { |item| {'id' => item[:definition].object_id.to_s, 'name' => item[:name], 'instances' => item[:placements]} }}.tap do |group|
+         group['hint_match'] = true if hint_match
+       end
     end
 
     def candidate_hint_token(definition)

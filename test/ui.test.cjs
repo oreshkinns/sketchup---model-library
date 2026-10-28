@@ -52,6 +52,52 @@ test('duplicates open on whole MAFs and nested matches are separated by parent',
   assert.match(await p.locator('#duplicates-list').textContent(),/Качели 2/);
 });
 
+test('nested merge previews the selected parent and invalidates stale confirmations',async t=>{
+  const data=fixture();data.nested_duplicates=[{id:'part',label:'Болт',owner_id:'1',owner_name:'Качели',classification:'confirmed',replaceable:true,definitions:[{id:'3',name:'A',instances:1},{id:'4',name:'B',instances:1}]}];
+  const p=await open(t,data);
+  await p.locator('.nav [data-page="duplicates"]').click();
+  await p.locator('[data-duplicate-scope="nested"]').click();
+  assert.equal(await p.locator('#merge-nested').isDisabled(),true);
+  await p.locator('#duplicate-owner').selectOption('1');
+  await p.locator('#merge-nested').click();
+  const request=(await calls(p,'preview_nested_merge')).at(-1);
+  assert.equal(request[1],'1');
+  assert.equal(await p.locator('#confirm').isDisabled(),true);
+  await p.evaluate(token=>MAF.receive({nested_merge_preview:{token,owner_id:'1',owner_name:'Качели',groups:1,definitions:2,placements:4,skipped:1,details:[{label:'Болт',target:'A',status:'eligible'},{label:'Группа',status:'skipped',reason:'Недоступно'}]}}),request[2]);
+  assert.match(await p.locator('#modal-summary').textContent(),/Качели/);
+  assert.match(await p.locator('#modal-description').textContent(),/все размещения выбранного МАФа/);
+  assert.match(await p.locator('#modal-summary').textContent(),/Можно объединить/);
+  assert.match(await p.locator('#modal-summary').textContent(),/Пропущено/);
+  assert.doesNotMatch(await p.locator('#modal-summary').textContent(),/eligible|skipped/);
+  assert.equal(await p.locator('#confirm').isDisabled(),false);
+  await p.evaluate(()=>MAF.receive({report_stale:true}));
+  assert.equal(await p.locator('#confirm').isDisabled(),true);
+  await p.evaluate(token=>MAF.receive({nested_merge_preview:{token,owner_id:'1',groups:1}}),request[2]);
+  assert.equal(await p.locator('#confirm').isDisabled(),true);
+  assert.equal((await calls(p,'merge_nested_duplicates')).length,0);
+});
+
+test('nested merge submits the same owner and preview token',async t=>{
+  const data=fixture();data.nested_duplicates=[{id:'part',label:'Болт',owner_id:'1',owner_name:'Качели',classification:'confirmed',replaceable:true,definitions:[{id:'3',name:'A',instances:1},{id:'4',name:'B',instances:1}]}];
+  const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();await p.locator('[data-duplicate-scope="nested"]').click();await p.locator('#duplicate-owner').selectOption('1');await p.locator('#merge-nested').click();
+  const request=(await calls(p,'preview_nested_merge')).at(-1);
+  await p.evaluate(token=>MAF.receive({nested_merge_preview:{token,owner_id:'1',groups:1,details:[]}}),request[2]);
+  await p.locator('#confirm').click();
+  assert.deepEqual((await calls(p,'merge_nested_duplicates')).at(-1),['merge_nested_duplicates','1',request[2]]);
+});
+
+test('destructive confirm keeps high contrast in light and dark themes',async t=>{
+  const p=await open(t);
+  for(const theme of ['light','dark']){
+    await p.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+    await p.locator('.nav [data-page="sections"]').click();
+    await p.locator('[data-delete-section="Скамейки"]').click();
+    const colors=await p.locator('#confirm').evaluate(el=>{const s=getComputedStyle(el);return {fg:s.color,bg:s.backgroundColor}});
+    assert.equal(colors.fg,'rgb(255, 255, 255)');assert.equal(colors.bg,'rgb(161, 45, 45)');
+    await p.locator('#cancel').click();
+  }
+});
+
 test('mixed-scope duplicates cannot focus or replace all uses accidentally',async t=>{
   const data=fixture();data.duplicates=[{id:'mixed',label:'МАФ',scope_conflict:true,classification:'confirmed',replaceable:false,reasons:['Используется в других местах'],definitions:[{id:'1',name:'МАФ 1',instances:1},{id:'2',name:'МАФ 2',instances:1}]}];
   const p=await open(t,data);
