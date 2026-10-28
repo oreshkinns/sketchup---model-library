@@ -5,7 +5,7 @@ module MafLibrary
     end
 
     def catalog(scope)
-      Catalog.new(@settings.path(scope))
+      Catalog.new(@settings.path(scope), removal_allowed: @settings.removal_allowed?(scope))
     end
 
     def entries

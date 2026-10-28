@@ -270,7 +270,7 @@ test('gallery fits the automatic and minimum windows with models visible immedia
   }
 });
 
-test('library deletion confirms exact scope, supports cancel, and excludes cloud cards',async t=>{
+test('library deletion confirms personal scope, supports cancel, and excludes both shared sources',async t=>{
   const data=fixture();data.catalog.push({id:'cloud-item',scope:'cloud',name:'Облачная скамья'});
   const p=await open(t,data);
   const personal=p.locator('[data-card-key="personal:same"]');
@@ -284,6 +284,35 @@ test('library deletion confirms exact scope, supports cancel, and excludes cloud
   await p.locator('#confirm').click();
   assert.deepEqual((await calls(p,'delete_catalog_model')).at(-1),['delete_catalog_model','same','personal']);
   assert.equal(await p.locator('[data-card-key="cloud:cloud-item"] [data-delete-catalog]').count(),0);
+  assert.equal(await p.locator('[data-card-key="shared:same"] [data-delete-catalog]').count(),0);
+  await p.evaluate(()=>{const b=document.createElement('button');b.dataset.deleteCatalog='same';b.dataset.deleteScope='shared';document.body.appendChild(b);b.click();b.remove()});
+  assert.equal(await p.locator('#modal-backdrop').getAttribute('class'),'modal-backdrop');
+  assert.equal((await calls(p,'delete_catalog_model')).length,1);
+});
+
+test('shared local and online libraries have distinct filters and local folder setup',async t=>{
+  const data=fixture();data.catalog.push({id:'cloud-item',scope:'cloud',name:'Онлайн скамья'});data.catalog_sync_errors=[];
+  data.settings.shared='D:/Общие модели/МАФ';
+  const p=await open(t,data);
+  assert.equal(await p.locator('#catalog-scope option[value="shared"]').textContent(),'Общая локальная');
+  assert.equal(await p.locator('#catalog-scope option[value="cloud"]').textContent(),'Общая онлайн');
+  await p.locator('#catalog-scope').selectOption('shared');
+  assert.deepEqual(await p.locator('[data-card-key]').evaluateAll(cards=>cards.map(c=>c.dataset.cardKey)),['shared:same']);
+  assert.equal(await p.locator('#shared-library-info').isVisible(),true);
+  assert.match(await p.locator('#shared-library-info').textContent(),/Удаление из плагина запрещено/);
+  assert.equal(await p.locator('#shared-library-path').textContent(),data.settings.shared);
+  await p.locator('#shared-library-info [data-choose-path="shared"]').click();
+  assert.deepEqual((await calls(p,'choose_library_path')).at(-1),['choose_library_path','shared']);
+  await p.evaluate(()=>MAF.receive({catalog_update:{catalog:[],settings:{shared:'D:/Новая папка'}}}));
+  assert.match(await p.locator('#catalog-list').textContent(),/моделей пока нет/);
+  assert.equal(await p.locator('#shared-library-path').textContent(),'D:/Новая папка');
+  assert.equal(await p.locator('#shared-library-info [data-choose-path="shared"]').isVisible(),true);
+  await p.setViewportSize({width:620,height:410});
+  assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+  await p.locator('#catalog-tools summary').click();
+  await p.locator('#compact-catalog-scope').selectOption('cloud');
+  assert.equal(await p.locator('#shared-library-info').isHidden(),true);
+  assert.equal(await p.locator('#catalog-scope').inputValue(),'cloud');
 });
 
 test('gallery add menu keeps destination and all three import actions reachable',async t=>{

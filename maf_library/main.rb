@@ -673,6 +673,7 @@ module MafLibrary
 
     def delete_catalog_model(id, scope)
       raise ArgumentError, 'Облачная библиотека доступна только для чтения' unless Settings::SCOPES.include?(scope)
+      raise ArgumentError, 'Удаление моделей из общей библиотеки запрещено' if scope == 'shared'
       @catalogs.catalog(scope).remove(id)
       mark_report_stale
       refresh_catalog('Модель удалена из библиотеки. Размещения в проекте и файл .skp сохранены.')

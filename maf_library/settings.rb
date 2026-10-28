@@ -22,12 +22,17 @@ module MafLibrary
       SCOPES.to_h { |scope| [scope, path(scope)] }
     end
 
+    def removal_allowed?(scope)
+      check_scope(scope)
+      scope == 'personal' && !same_directory?(path('personal'), path('shared'))
+    end
+
     def set_path(scope, folder)
       check_scope(scope)
       raise ArgumentError, 'Выберите существующую папку' unless folder && File.directory?(folder)
       chosen = File.realpath(folder)
       other = (SCOPES - [scope]).first
-      raise ArgumentError, 'Личная и общая библиотеки должны быть в разных папках' if chosen == File.expand_path(path(other))
+      raise ArgumentError, 'Личная и общая библиотеки должны быть в разных папках' if same_directory?(chosen, path(other))
       current = data
       current['paths'] ||= {}
       current['paths'][scope] = chosen
@@ -113,6 +118,16 @@ module MafLibrary
     end
 
     private
+
+    def same_directory?(first, second)
+      # realpath resolves aliases in saved settings; Windows treats path case
+      # insensitively. Older settings may still point both scopes at one folder.
+      normalized = [first, second].map do |path|
+        resolved = File.exist?(path) ? File.realpath(path) : File.expand_path(path)
+        RUBY_PLATFORM.match?(/mswin|mingw|cygwin/) ? resolved.tr('\\', '/').downcase : resolved
+      end
+      normalized.first == normalized.last
+    end
 
     def check_scope(scope)
       raise ArgumentError, 'Неизвестная библиотека' unless SCOPES.include?(scope)

@@ -45,6 +45,41 @@ class CatalogRemovalTest < Minitest::Test
     assert_equal @entry['id'], @catalog.entries.first['id']
     assert_equal 'model bytes', File.binread(path)
   end
+
+  def test_shared_catalog_rejects_removal_without_changing_assets_or_manifest
+    settings = MafLibrary::Settings.new(File.join(@dir, 'settings.json'),
+      personal: File.join(@dir, 'personal'), shared: File.join(@dir, 'shared'))
+    shared = MafLibrary::CatalogManager.new(settings).catalog('shared')
+    entry = shared.import(@source, name: 'Общая скамья', category: 'Скамейки')
+    manifest = File.binread(File.join(shared.root, 'catalog.json'))
+    path = shared.file_for(entry['id'])
+    error = assert_raises(ArgumentError) { shared.remove(entry['id']) }
+    assert_match(/общей.*запрещено/, error.message)
+    assert_equal manifest, File.binread(File.join(shared.root, 'catalog.json'))
+    assert_equal 'model bytes', File.binread(path)
+    assert_equal entry['id'], shared.find(entry['id'])['id']
+    shared.assign_section(entry['id'], 'Другой раздел')
+    assert_equal 'Другой раздел', shared.find(entry['id'])['category']
+  end
+
+  def test_personal_alias_of_shared_storage_cannot_bypass_removal_protection
+    settings = MafLibrary::Settings.new(File.join(@dir, 'settings.json'),
+      personal: File.join(@dir, 'shared', '..', 'shared'), shared: File.join(@dir, 'shared'))
+    manager = MafLibrary::CatalogManager.new(settings)
+    entry = manager.catalog('shared').import(@source, name: 'Общая скамья', category: 'Скамейки')
+    assert_raises(ArgumentError) { manager.catalog('personal').remove(entry['id']) }
+    assert_equal entry['id'], manager.catalog('shared').entries.first['id']
+  end
+
+  def test_settings_reject_reusing_shared_folder_as_personal
+    shared = File.join(@dir, 'shared')
+    FileUtils.mkdir_p(shared)
+    settings = MafLibrary::Settings.new(File.join(@dir, 'settings.json'),
+      personal: File.join(@dir, 'personal'), shared: shared)
+    alias_path = File.join(shared, '..', 'shared')
+    assert_raises(ArgumentError) { settings.set_path('personal', alias_path) }
+    assert_equal File.join(@dir, 'personal'), settings.path('personal')
+  end
 end
 
 class ControllerRecognitionTest
@@ -64,10 +99,20 @@ class ControllerRecognitionTest
   end
 
   def test_delete_catalog_model_rejects_cloud_and_unknown_scope
-    %w[cloud other].each do |scope|
+    %w[shared cloud other].each do |scope|
       assert_raises(ArgumentError) { @controller.send(:delete_catalog_model, 'id', scope) }
     end
     assert_empty @catalogs.entries
+  end
+
+  def test_shared_delete_callback_reports_error_and_keeps_card
+    source = File.join(@dir, 'source.skp')
+    File.binwrite(source, 'model bytes')
+    entry = @catalogs.catalog('shared').import(source, name: 'Общая скамья', category: 'Скамейки')
+    capture_io { @dialog.callbacks.fetch('delete_catalog_model').call(nil, entry['id'], 'shared') }
+    assert @dialog.payloads.last['error']
+    assert_match(/общей.*запрещено/, @dialog.payloads.last['message'])
+    assert_equal entry['id'], @catalogs.catalog('shared').find(entry['id'])['id']
   end
 end
 

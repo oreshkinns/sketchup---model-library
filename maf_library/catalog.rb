@@ -15,8 +15,9 @@ module MafLibrary
 
     attr_reader :root
 
-    def initialize(root)
+    def initialize(root, removal_allowed: true)
       @root = root
+      @removal_allowed = removal_allowed
     end
 
     def entries
@@ -29,6 +30,7 @@ module MafLibrary
     end
 
     def remove(id)
+      raise ArgumentError, 'Удаление моделей из общей библиотеки запрещено' unless @removal_allowed
       items = entries
       entry = items.find { |item| item['id'] == id }
       raise ArgumentError, 'Модель не найдена в каталоге' unless entry
