@@ -120,8 +120,10 @@ module MafLibrary
     private
 
     def same_directory?(first, second)
-      # realpath resolves aliases in saved settings; Windows treats path case
-      # insensitively. Older settings may still point both scopes at one folder.
+      # Filesystem identity also resolves Windows drive mappings that realpath
+      # preserves. Keep path comparison for folders that do not exist yet.
+      return true if File.identical?(first, second)
+
       normalized = [first, second].map do |path|
         resolved = File.exist?(path) ? File.realpath(path) : File.expand_path(path)
         RUBY_PLATFORM.match?(/mswin|mingw|cygwin/) ? resolved.tr('\\', '/').downcase : resolved

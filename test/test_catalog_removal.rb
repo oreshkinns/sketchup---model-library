@@ -80,6 +80,55 @@ class CatalogRemovalTest < Minitest::Test
     assert_raises(ArgumentError) { settings.set_path('personal', alias_path) }
     assert_equal File.join(@dir, 'personal'), settings.path('personal')
   end
+
+  def test_settings_reject_windows_drive_alias_for_either_library
+    with_windows_drive_alias do |alias_root|
+      shared = File.join(@dir, 'shared')
+      personal = File.join(@dir, 'personal')
+      FileUtils.mkdir_p([shared, personal])
+      settings = MafLibrary::Settings.new(File.join(@dir, 'settings.json'), personal: personal, shared: shared)
+      assert File.identical?(shared, File.join(alias_root, 'shared'))
+      refute_equal File.realpath(shared), File.realpath(File.join(alias_root, 'shared'))
+      assert_raises(ArgumentError) { settings.set_path('personal', File.join(alias_root, 'shared')) }
+      assert_raises(ArgumentError) { settings.set_path('shared', File.join(alias_root, 'personal')) }
+      assert_equal({'personal' => personal, 'shared' => shared}, settings.paths)
+      refute File.exist?(File.join(@dir, 'settings.json'))
+    end
+  end
+
+  def test_legacy_windows_drive_alias_cannot_remove_shared_cards
+    with_windows_drive_alias do |alias_root|
+      shared = File.join(@dir, 'shared')
+      settings_file = File.join(@dir, 'settings.json')
+      File.write(settings_file, JSON.generate('paths' => {'personal' => File.join(alias_root, 'shared'), 'shared' => shared}))
+      settings = MafLibrary::Settings.new(settings_file, personal: File.join(@dir, 'personal'), shared: shared)
+      manager = MafLibrary::CatalogManager.new(settings)
+      entry = manager.catalog('shared').import(@source, name: 'Общая скамья', category: 'Скамейки')
+      manifest_path = File.join(shared, 'catalog.json')
+      manifest = File.binread(manifest_path)
+      model_path = manager.catalog('shared').file_for(entry['id'])
+      refute settings.removal_allowed?('personal')
+      assert_raises(ArgumentError) { manager.catalog('personal').remove(entry['id']) }
+      assert_equal manifest, File.binread(manifest_path)
+      assert_equal 'model bytes', File.binread(model_path)
+      assert_equal entry['id'], manager.catalog('shared').entries.first['id']
+    end
+  end
+
+  private
+
+  def with_windows_drive_alias
+    skip 'Windows SUBST alias regression' unless RUBY_PLATFORM.match?(/mswin|mingw|cygwin/)
+    alias_drive = ('E'..'Z').to_a.reverse.find do |letter|
+      system('subst', "#{letter}:", @dir, out: File::NULL, err: File::NULL)
+    end
+    skip 'No drive available for an isolated SUBST alias' unless alias_drive
+    yield "#{alias_drive}:/"
+  ensure
+    if alias_drive
+      raise 'Could not remove test SUBST mapping' unless system('subst', "#{alias_drive}:", '/D', out: File::NULL, err: File::NULL)
+    end
+  end
 end
 
 class ControllerRecognitionTest
