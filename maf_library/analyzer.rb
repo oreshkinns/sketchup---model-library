@@ -165,18 +165,13 @@ module MafLibrary
             end
             @geometry_reader ||= DefinitionSignature.new(mode: :geometry)
             item = @items[@candidate_index]
-            if item[:signature_sampled]
-              item[:candidate_hints] = []
-              @candidate_index += 1
-              budget -= 1
-              next
-            end
             @geometry_session ||= @geometry_reader.start_call(item[:definition])
             finished = @geometry_session.step(max_entities: [budget, 1].max, deadline: deadline)
             budget -= [@geometry_session.processed, 1].max
             if finished
               signature = @geometry_session.result
               item[:geometry_signature] = signature[:digest]
+              item[:geometry_sampled] = signature[:sampled]
               item[:geometry_complete] = signature[:complete] && !signature[:sampled]
               register_candidate_hints(item, @unmatched_indexes[item[:definition].object_id], signature)
               @candidate_index += 1
@@ -263,7 +258,7 @@ module MafLibrary
 
       def register_candidate_hints(item, index, structure)
         hints = []
-        if structure && structure[:digest] && structure[:complete] && !structure[:sampled]
+        if structure && structure[:digest] && (structure[:complete] || structure[:sampled])
           hints << [item[:kind], :geometry, structure[:digest]]
         end
         # Scoped matching needs evidence even when this definition matched an
@@ -501,7 +496,7 @@ module MafLibrary
         end
       end
 
-      # Similar names or bounds surface review candidates. They never authorize merging.
+      # Geometry evidence surfaces review candidates. It never authorizes merging.
       matched_ids = groups.each_with_object({}) do |group, ids|
         group['definitions'].each { |reference| ids[reference['id']] = true }
       end
@@ -516,14 +511,9 @@ module MafLibrary
       end
       first_by_hint = {}
       unmatched.each_with_index do |item, index|
-        kind = item[:kind]
-        name = item[:name].to_s
-        bounds = bounds_token(item[:definition])
-        hints = []
-        # String#casecmp folds ASCII letters only; keep the same candidate groups.
-        hints << [kind, :name, name.downcase(:ascii)] unless name.empty?
-        hints << [kind, :bounds, bounds] unless bounds.empty?
-        hints << [kind, :structure, candidate_hint_token(item[:definition])]
+        @geometry_candidate_reader ||= DefinitionSignature.new(mode: :geometry)
+        evidence = @geometry_candidate_reader.call(item[:definition])
+        hints = evidence[:digest] && (evidence[:complete] || evidence[:sampled]) ? [[item[:kind], :geometry, evidence[:digest]]] : []
         hints.each do |hint|
           first = first_by_hint[hint]
           if first

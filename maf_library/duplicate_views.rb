@@ -112,11 +112,12 @@ module MafLibrary
               next if seen_groups[key]
               seen_groups[key] = true
               complete = members.map { |member| member[2][:digest] }.uniq.length == 1 && members.all? { |_, _, signature, _| signature[:digest] && signature[:complete] && !signature[:sampled] }
-              classification = complete ? 'confirmed' : (members.any? { |_, _, signature| signature[:sampled] } ? 'candidate' : 'similar')
+              sampled = members.any? { |_, _, signature, geometry| signature[:sampled] || geometry[:sampled] }
+              classification = complete ? 'confirmed' : (sampled ? 'candidate' : 'similar')
               @groups << {'id' => "group:#{members.first[3][:digest]}", 'kind' => 'group', 'parts_only' => true,
                 'label' => members.first[1][:name], 'classification' => classification,
-                'replaceable' => false, 'confidence' => complete ? 'Полная сигнатура совпадает' : 'Возможный дубль · проверить вручную',
-                'reasons' => ['Автоматическое объединение групп отключено'],
+                'replaceable' => false, 'confidence' => complete ? 'Полная сигнатура совпадает' : (sampled ? 'Геометрия проверена выборочно · обязательно проверьте вручную' : 'Возможный дубль · проверить вручную'),
+                'reasons' => ['Автоматическое объединение групп отключено'] + (sampled ? ['Сигнатура содержит выборку; автоматическое объединение запрещено'] : []),
                 'definitions' => members.map { |id, item, exact, _comparison| {'id' => id, 'name' => item[:name], 'instances' => item[:placements], 'exact_signature' => exact[:digest], 'exact_complete' => exact[:complete] && !exact[:sampled]} }}
             end
             @structural_groups_built = true
@@ -247,7 +248,7 @@ module MafLibrary
         conflict = !conflict_ids.empty?
         if group['parts_only']
           exact = entries.all? { |entry| entry['exact_complete'] && entry['exact_signature'] } && entries.map { |entry| entry['exact_signature'] }.uniq.length == 1
-          group = group.merge('classification' => exact ? 'confirmed' : 'candidate', 'confidence' => exact ? 'Полная сигнатура совпадает' : 'Возможный дубль · проверить вручную')
+          group = group.merge('classification' => exact ? 'confirmed' : 'candidate', 'confidence' => exact ? 'Полная сигнатура совпадает' : group['confidence'])
         end
         reasons = Array(group['reasons']).dup
         reasons << 'Определение используется в других местах; действия со всей моделью заблокированы' if conflict

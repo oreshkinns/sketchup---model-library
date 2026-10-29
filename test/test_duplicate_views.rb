@@ -194,6 +194,29 @@ class DuplicateViewsTest < Minitest::Test
       exact_match['definitions'].map { |entry| entry['id'] }.sort
   end
 
+  def test_sampled_structural_group_material_variants_are_nested_candidates
+    material = Struct.new(:name, :color, :alpha, :texture)
+    groups = ['Wood', 'Metal'].map do |name|
+      edges = Array.new(150) do
+        edge = FakeEdge.new
+        edge.define_singleton_method(:material) { material.new(name, [1, 2, 3], 1, nil) }
+        edge
+      end
+      Sketchup::Group.new(edges, name: name)
+    end
+    parent = FakeDefinition.new('MAF', groups, {['MafLibrary', 'maf_decision'] => 'confirmed'})
+    report = MafLibrary::Analyzer.new(FakeModel.new([Sketchup::ComponentInstance.new(parent)])).scan
+    MafLibrary::ModelRecognition.new(report, catalog_entries: []).apply
+    session = MafLibrary::DuplicateViews.new(report).start
+    10_000.times { break if session.step(max_items: 1) }
+    assert session.done?
+    match = report['nested_duplicates'].find { |candidate| candidate['kind'] == 'group' }
+    refute_nil match
+    refute match['replaceable']
+    assert_match(/выбороч/, match['confidence'])
+    assert_match(/выборку/, match['reasons'].join)
+  end
+
   def test_scoped_sampled_signature_candidates_keep_sampling_warning
     # Identical sampled signatures retain their warning. A name alone cannot
     # produce a candidate when the sampled geometries differ.

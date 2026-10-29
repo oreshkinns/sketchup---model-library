@@ -131,6 +131,62 @@ class DuplicateAnalysisTest < Minitest::Test
     refute group['replaceable']
   end
 
+  def sampled_material_definition(name, color, offset: 0)
+    material = Struct.new(:name, :color, :alpha, :texture).new(name, color, 1, nil)
+    definition(name, 150.times.map do |index|
+      item = edge(index + offset, index + offset + 1)
+      item.define_singleton_method(:material) { material }
+      item
+    end)
+  end
+
+  def test_large_material_variants_are_sampled_geometry_candidates
+    first = sampled_material_definition('Timber bench', [255, 0, 0])
+    second = sampled_material_definition('Completely different name', [0, 0, 255])
+    group = scan(first, second)['duplicates'].fetch(0)
+    assert_equal 'candidate', group['classification']
+    refute group['replaceable']
+    assert_match(/выбороч/, group['confidence'])
+    assert_match(/выборку/, group['reasons'].join)
+  end
+
+  def test_nested_large_material_variants_keep_sampled_geometry_evidence
+    first = definition('Assembly A', [Sketchup::ComponentInstance.new(sampled_material_definition('Wood', [255, 0, 0]))])
+    second = definition('Assembly B', [Sketchup::ComponentInstance.new(sampled_material_definition('Metal', [0, 0, 255]))])
+    group = scan(first, second)['duplicates'].find { |candidate| candidate['definitions'].map { |entry| entry['id'] }.sort == [first, second].map { |d| d.object_id.to_s }.sort }
+    refute_nil group
+    refute group['replaceable']
+    assert_match(/выбороч/, group['confidence'])
+    sync = MafLibrary::DefinitionSignature.new(mode: :geometry).call(first)
+    session = MafLibrary::DefinitionSignature.new(mode: :geometry).start_call(second)
+    session.step(max_entities: 1) until session.done?
+    assert sync[:sampled]
+    assert session.result[:sampled]
+    refute sync[:complete]
+    assert_equal sync[:digest], session.result[:digest]
+  end
+
+  def test_large_same_counts_different_geometry_does_not_match
+    first = sampled_material_definition('Same', [255, 0, 0])
+    second = sampled_material_definition('Same', [0, 0, 255], offset: 10)
+    assert_empty scan(first, second)['duplicates']
+  end
+
+  def test_sampled_unknown_geometry_is_unusable_even_nested
+    first = definition('First', Array.new(150) { Object.new })
+    second = definition('Second', Array.new(150) { Object.new })
+    [first, second, definition('Container', [Sketchup::ComponentInstance.new(first)])].each do |item|
+      sync = MafLibrary::DefinitionSignature.new(mode: :geometry).call(item)
+      assert_nil sync[:digest]
+      session = MafLibrary::DefinitionSignature.new(mode: :geometry).start_call(item)
+      session.step(max_entities: 1) until session.done?
+      assert_nil session.result[:digest]
+    end
+    # Other signature modes retain their existing review evidence contract.
+    refute_nil MafLibrary::DefinitionSignature.new(mode: :duplicate).call(first)[:digest]
+    assert_empty MafLibrary::Analyzer.new(FakeModel.new([Sketchup::ComponentInstance.new(first), Sketchup::ComponentInstance.new(second)])).scan['references'].values.flat_map { |item| item[:candidate_hints] }
+  end
+
   private
 
   def edge(a, b)

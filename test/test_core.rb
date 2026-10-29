@@ -359,7 +359,7 @@ class AnalyzerTest < Minitest::Test
     end.new
     definition = FakeDefinition.new('Большая модель', [edge] * 10_000)
     report = MafLibrary::Analyzer.new(FakeModel.new([Sketchup::ComponentInstance.new(definition)])).scan
-    assert_operator edge.reads, :<=, 100
+    assert_operator edge.reads, :<=, 2 * MafLibrary::DefinitionSignature::SIGNATURE_SAMPLE_LIMIT
     assert_equal 1, report['summary']['instances']
     assert_equal 1, report['summary']['sampled_definitions']
   end

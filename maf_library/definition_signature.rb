@@ -149,7 +149,8 @@ module MafLibrary
         sampled[id] = !!frame[:sampled]
         complete[id] = !sampled[id] && !frame[:textured] && tokens.none?(&:nil?) &&
           tokens.none? { |token| @reader.__send__(:contains_unknown?, token) } && !@reader.instance_variable_get(:@uncertain)
-        cache[id] = Digest::SHA256.hexdigest(JSON.generate(evidence))
+        usable = tokens.none?(&:nil?) && tokens.none? { |token| @reader.__send__(:contains_unknown?, token) } && !@reader.instance_variable_get(:@uncertain)
+        cache[id] = @reader.instance_variable_get(:@mode) == :geometry && !usable ? nil : Digest::SHA256.hexdigest(JSON.generate(evidence))
       rescue StandardError
         cache[id] = nil
         complete[id] = false
@@ -190,7 +191,8 @@ module MafLibrary
         evidence << (definition.respond_to?(:insertion_point) ? point_token(definition.insertion_point) : [])
       end
       @signature_complete[id] = complete && !@signature_sampled[id] && !@uncertain
-      value = Digest::SHA256.hexdigest(JSON.generate(evidence))
+      usable = tokens.none?(&:nil?) && tokens.none? { |token| contains_unknown?(token) } && !@uncertain
+      value = @mode == :geometry && !usable ? nil : Digest::SHA256.hexdigest(JSON.generate(evidence))
       @signature_cache[id] = value
     rescue StandardError
       @signature_complete[id] = false
@@ -211,7 +213,7 @@ module MafLibrary
     def entity_token(entity, stack)
       core = if entity.is_a?(Sketchup::ComponentInstance) || entity.is_a?(Sketchup::Group)
                nested_signature = signature(entity.definition, stack)
-               return nil if nested_signature.nil? || !@signature_complete[entity.definition.object_id]
+               return nil if nested_signature.nil? || (@mode != :geometry && !@signature_complete[entity.definition.object_id])
                ['instance', entity.class.name, nested_signature, transform_token(entity)]
              elsif defined?(Sketchup::Edge) && entity.is_a?(Sketchup::Edge)
                ['edge', [point_token(entity.start.position), point_token(entity.end.position)].sort]
