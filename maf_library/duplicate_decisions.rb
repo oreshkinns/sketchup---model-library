@@ -25,7 +25,8 @@ module MafLibrary
 
     def self.apply(report, settings, model)
       report['_duplicate_decision_source'] ||= {
-        'duplicates' => Array(report['duplicates']), 'nested_duplicates' => Array(report['nested_duplicates'])
+        'duplicates' => Array(report['duplicates']), 'nested_duplicates' => Array(report['nested_duplicates']),
+        'other_duplicates' => Array(report['other_duplicates'])
       }
       decisions = settings.ignored_duplicate_pairs.filter_map do |key|
         parsed = JSON.parse(key) rescue nil
@@ -90,6 +91,7 @@ module MafLibrary
     def self.update_summary(report)
       report['summary']['duplicate_groups'] = report['duplicates'].length
       report['summary']['nested_duplicate_groups'] = report['nested_duplicates'].length
+      report['summary']['other_duplicate_groups'] = Array(report['other_duplicates']).length
     end
   end
 end

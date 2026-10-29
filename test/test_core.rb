@@ -849,6 +849,22 @@ class ControllerTest < Minitest::Test
     assert_equal [instances[1]], Sketchup.active_model.active_view.zoomed_entities
   end
 
+  def test_focus_rows_accepts_unrecognized_model_and_rejects_stale_or_unknown_rows
+    definition = FakeDefinition.new('Кирпич', [FakeEdge.new])
+    instance = Sketchup::ComponentInstance.new(definition)
+    Sketchup.active_model = FakeModel.new([instance])
+    report = MafLibrary::Analyzer.new(Sketchup.active_model).scan
+    @controller.instance_variable_set(:@last_model, Sketchup.active_model)
+    @controller.instance_variable_set(:@last_report, report)
+    row_id = report.fetch('models').first.fetch('id')
+    @controller.send(:focus_rows, [row_id])
+    assert_equal [instance], Sketchup.active_model.selection
+    assert_equal [instance], Sketchup.active_model.active_view.zoomed_entities
+    assert_raises(RuntimeError) { @controller.send(:focus_rows, ['missing']) }
+    @controller.instance_variable_set(:@report_stale, true)
+    assert_raises(RuntimeError) { @controller.send(:focus_rows, [row_id]) }
+  end
+
   def test_focus_callback_combines_models_from_different_duplicate_groups
     definitions = [FakeDefinition.new('A1', [Object.new]), FakeDefinition.new('A2', [Object.new]),
                    FakeDefinition.new('B1', [Object.new, Object.new]), FakeDefinition.new('B2', [Object.new, Object.new])]

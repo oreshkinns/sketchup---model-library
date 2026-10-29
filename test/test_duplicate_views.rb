@@ -59,6 +59,33 @@ class DuplicateViewsTest < Minitest::Test
     report = partition(hierarchy, [group('parts', [['part1',1],['part2',1]])])
     assert_empty report['duplicates']
     assert_empty report['nested_duplicates']
+    match = report.fetch('other_duplicates').fetch(0)
+    assert_equal %w[part1 part2], match['definitions'].map { |entry| entry['id'] }
+    assert_equal 'other', match['scope']
+    refute match['replaceable']
+    assert_equal 0, report['summary']['recognized_maf_definitions']
+    assert_equal 1, report['summary']['other_duplicate_groups']
+  end
+
+  def test_unrecognized_structural_groups_remain_visible_without_recognition
+    groups = 2.times.map { Sketchup::Group.new([FakeEdge.new], name: 'Кирпич') }
+    report = MafLibrary::Analyzer.new(FakeModel.new(groups)).scan
+    MafLibrary::ModelRecognition.new(report, catalog_entries: []).apply
+    session = MafLibrary::DuplicateViews.new(report).start
+    5000.times { break if session.step(max_items: 5) }
+    assert session.done?
+    match = report.fetch('other_duplicates').find { |item| item['kind'] == 'group' }
+    refute_nil match
+    refute match['replaceable']
+    assert_empty report['duplicates']
+    assert_empty report['nested_duplicates']
+    match['definitions'].each { |entry| assert report['references'][entry['id'].to_i] }
+  end
+
+  def test_whole_matches_are_not_repeated_in_other_scope
+    report = partition([node('a', 'A', maf: true), node('b', 'B', maf: true)], [group('same', [['a', 1], ['b', 1]])])
+    assert_equal 1, report['duplicates'].length
+    assert_empty report['other_duplicates']
   end
 
   def test_nested_counts_account_for_repeated_maf_placements

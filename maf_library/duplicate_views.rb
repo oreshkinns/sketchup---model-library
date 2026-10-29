@@ -70,6 +70,10 @@ module MafLibrary
               record_candidate(id, 'whole', nil, node['instances'].to_i)
               @owners[id] ||= node['name'].to_s
               next_owner = id
+            elsif !id.empty?
+              group_record = node['kind'] == 'group' && (@structural[id.to_i] || (@report['references'] || {})[id.to_i])
+              @structural_ids[id] = true if group_record
+              record_candidate(id, 'other', nil, node['instances'].to_i) unless group_record
             end
             Array(node['children']).reverse_each { |child| @stack << [child, next_owner] }
           elsif @structural_list.nil?
@@ -177,10 +181,22 @@ module MafLibrary
               unique[key] = group if !previous || (previous['classification'] != 'confirmed' && group['classification'] == 'confirmed')
             end
             @results = unique.values
+            # Recognition describes an object's role, not whether its geometry
+            # can be compared. Keep evidence that no role-specific view shows.
+            represented = @results.to_h { |result| [result['definitions'].map { |entry| entry['id'].to_s }.sort, true] }
+            @groups.each do |group|
+              ids = Array(group['definitions']).map { |entry| entry['id'].to_s }.sort
+              next if ids.length < 2 || represented[ids]
+              @results << scoped_group(group, 'other', nil, group['definitions'].map { |entry| [entry, entry['instances'].to_i] })
+              represented[ids] = true
+            end
             @report['duplicates'] = @results.select { |group| group['scope'] == 'whole' }
             @report['nested_duplicates'] = @results.select { |group| group['scope'] == 'nested' }
+            @report['other_duplicates'] = @results.select { |group| group['scope'] == 'other' }
             @report['summary']['duplicate_groups'] = @report['duplicates'].length
             @report['summary']['nested_duplicate_groups'] = @report['nested_duplicates'].length
+            @report['summary']['other_duplicate_groups'] = @report['other_duplicates'].length
+            @report['summary']['recognized_maf_definitions'] = @whole.length
             @done = true
             return true
           end
@@ -251,11 +267,12 @@ module MafLibrary
           group = group.merge('classification' => exact ? 'confirmed' : 'candidate', 'confidence' => exact ? 'Полная сигнатура совпадает' : group['confidence'])
         end
         reasons = Array(group['reasons']).dup
+        reasons << 'Область вне распознанных МАФ; проверьте назначение объектов вручную' if scope == 'other'
         reasons << 'Определение используется в других местах; действия со всей моделью заблокированы' if conflict
         group.merge('id' => Digest::SHA256.hexdigest(JSON.generate([group['id'], scope, owner, entries.map { |e| e['id'] }]))[0, 20],
           'label' => entries.first['name'], 'scope' => scope, 'owner_id' => owner,
           'owner_name' => owner && @owners[owner], 'scope_conflict' => conflict, 'scope_conflict_ids' => conflict_ids,
-          'replaceable' => group['replaceable'] == true && !conflict,
+          'replaceable' => group['replaceable'] == true && !conflict && scope != 'other',
           'reasons' => reasons, 'definitions' => entries)
       end
     end

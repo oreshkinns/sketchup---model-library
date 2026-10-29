@@ -246,6 +246,7 @@ module MafLibrary
       end
       @dialog.add_action_callback('export_report') { |_context| safely { export_report } }
       @dialog.add_action_callback('select_rows') { |_context, ids| safely { select_rows(ids) } }
+      @dialog.add_action_callback('focus_rows') { |_context, ids| safely { focus_rows(ids) } }
       @dialog.add_action_callback('set_duplicate_ignored') do |_context, group_id, left_id, right_id, ignored|
         safely { set_duplicate_ignored(group_id.to_s, left_id.to_s, right_id.to_s, ignored == true) }
       end
@@ -843,7 +844,21 @@ module MafLibrary
 
     def publish_duplicate_decisions(report)
       DuplicateDecisions.apply(report, @settings, model)
-      push(duplicate_decisions: report.select { |key, _| %w[duplicates nested_duplicates ignored_duplicates summary].include?(key) })
+      push(duplicate_decisions: report.select { |key, _| %w[duplicates nested_duplicates other_duplicates ignored_duplicates summary].include?(key) })
+    end
+
+    def focus_rows(ids)
+      keys = Array(ids).map(&:to_s).uniq
+      raise 'Выберите хотя бы одну модель' if keys.empty?
+      report = report_for_rows(keys)
+      definitions = keys.flat_map { |id| report['models'].find { |row| row['id'] == id }.fetch('definition_ids') }.uniq
+      @syncing_selection = true
+      count = ProjectActions.new(model, report, @catalogs).focus_definitions(definitions)
+      @expected_selection_ids = model.selection.map(&:object_id).sort
+      @selected_row_ids = keys
+      push(selected_rows: keys, message: "В фокусе размещений: #{count}.")
+    ensure
+      @syncing_selection = false
     end
 
     def focus_duplicates(ids)
@@ -869,9 +884,9 @@ module MafLibrary
       report = fresh_report
       keys = Array(ids).map(&:to_s).uniq
       group = duplicate_groups(report).find do |candidate|
-        candidate['id'].to_s == group_id && candidate['definitions'].map { |item| item['id'].to_s }.sort == keys.sort
+        candidate['id'].to_s == group_id && (keys - candidate['definitions'].map { |item| item['id'].to_s }).empty?
       end
-      raise ArgumentError, 'Группа дублей изменилась. Повторите анализ' unless group && keys.length <= 30
+      raise ArgumentError, 'Группа дублей изменилась. Повторите анализ' unless group && !keys.empty? && keys.length <= 30
       validate_report_definitions(report, keys)
       images = {}
       Dir.mktmpdir('maf-preview-') do |folder|
@@ -890,7 +905,7 @@ module MafLibrary
     end
 
     def duplicate_groups(report)
-      Array(report['duplicates']) + Array(report['nested_duplicates'])
+      Array(report['duplicates']) + Array(report['nested_duplicates']) + Array(report['other_duplicates'])
     end
 
     def unused_definition?(definition)

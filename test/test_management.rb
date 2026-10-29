@@ -72,13 +72,41 @@ class ControllerRecognitionTest
     @controller.instance_variable_set(:@last_model, @model)
     @controller.instance_variable_set(:@last_report, report)
     @controller.instance_variable_set(:@report_stale, false)
-    assert_raises(ArgumentError) { @controller.send(:duplicate_previews, 'same', [ids[0]], '1') }
+    assert_raises(ArgumentError) { @controller.send(:duplicate_previews, 'same', ['outsider'], '1') }
     @controller.send(:duplicate_previews, 'same', ids, '1')
     previews = @dialog.payloads.last.fetch('duplicate_previews')
     assert_equal ids, previews.fetch('ids')
     assert_equal '1', previews.fetch('token')
     assert_equal 'data:image/png;base64,aW1hZ2Utb25l', previews.fetch('images').fetch(ids[0])
     refute previews.fetch('images').key?(ids[1])
+  end
+
+  def test_duplicate_preview_pages_accept_only_bounded_nonempty_group_subsets
+    rendered = []
+    definitions = Array.new(31) { |index| FakeDefinition.new("Copy #{index}", [FakeEdge.new]) }
+    definitions.each do |definition|
+      definition.define_singleton_method(:save_thumbnail) do |path|
+        rendered << object_id.to_s
+        File.binwrite(path, 'thumbnail')
+        true
+      end
+    end
+    ids = definitions.map { |definition| definition.object_id.to_s }
+    report = {'other_duplicates' => [{'id' => 'large', 'definitions' => ids.first(21).map { |id| {'id' => id} }},
+      {'id' => 'oversized', 'definitions' => ids.map { |id| {'id' => id} }}],
+      'references' => definitions.to_h { |definition| [definition.object_id, {definition: definition, refs: {}}] }}
+    @controller.instance_variable_set(:@last_model, @model)
+    @controller.instance_variable_set(:@last_report, report)
+    @controller.instance_variable_set(:@report_stale, false)
+    page = ids.first(20)
+    @controller.send(:duplicate_previews, 'large', page, 'page1')
+    assert_equal page, rendered
+    assert_equal page, @dialog.payloads.last.fetch('duplicate_previews').fetch('images').keys
+    assert_raises(ArgumentError) { @controller.send(:duplicate_previews, 'large', [], 'empty') }
+    assert_raises(ArgumentError) { @controller.send(:duplicate_previews, 'large', [ids.first, 'outsider'], 'bad') }
+    assert_raises(ArgumentError) { @controller.send(:duplicate_previews, 'oversized', ids, 'oversized') }
+    assert_raises(ArgumentError) { @controller.send(:duplicate_previews, 'missing', page, 'badgroup') }
+    assert_equal page, rendered, 'Rejected requests must not render thumbnails'
   end
 
   def test_section_removal_refuses_project_or_catalog_use

@@ -777,3 +777,34 @@ test('pair decision response preserves library and settings and invalidates stal
  await p.evaluate(()=>MAF.receive({duplicate_decisions:{duplicates:[],nested_duplicates:[],ignored_duplicates:[],summary:{}}}));assert.equal(await p.locator('#confirm').isDisabled(),true);
  await p.keyboard.press('Escape');await p.locator('.nav [data-page="catalog"]').click();assert.equal(await p.locator('.catalog-card').count(),2);
 });
+
+test('recognition cards locate candidates and other dynamic models without decisions',async t=>{
+  const data=fixture();data.models.push(row('unknown',{is_maf:false,recognition_source:'none',metadata:{behavior_flags:{dynamic:true}}}));
+  const p=await open(t,data);await p.locator('.nav [data-page="overview"]').click();
+  for(const id of ['definition:3','definition:unknown']){
+    const select=p.locator(`[data-select-recognition="${id}"]`),focus=p.locator(`[data-focus-recognition="${id}"]`);
+    await select.locator('xpath=ancestor::details').evaluate(el=>el.open=true);
+    await select.click();assert.deepEqual((await calls(p,'select_rows')).at(-1),['select_rows',[id]]);
+    await focus.click();assert.deepEqual((await calls(p,'focus_rows')).at(-1),['focus_rows',[id]]);
+  }
+  assert.equal(await p.locator('#modal-backdrop').isVisible(),false);
+  assert.equal((await calls(p,'set_maf_decision')).length,0);
+  await p.evaluate(()=>MAF.receive({report_stale:true}));
+  assert.equal(await p.locator('[data-select-recognition]').first().isDisabled(),true);
+  assert.equal(await p.locator('[data-focus-recognition]').first().isDisabled(),true);
+  await p.evaluate(()=>document.querySelector('[data-focus-recognition]').dispatchEvent(new MouseEvent('click',{bubbles:true})));
+  assert.equal((await calls(p,'focus_rows')).length,2);
+  await p.evaluate(()=>MAF.receive({report_stale:false}));
+  assert.equal(await p.locator('[data-select-recognition]').first().isDisabled(),false);
+});
+
+test('other project duplicates are visible without confirming recognition',async t=>{
+  const data=fixture();data.other_duplicates=[{id:'other',label:'Динамический компонент',classification:'candidate',replaceable:false,definitions:[{id:'3',name:'Динамический компонент',instances:1},{id:'8',name:'Копия',instances:1}]}];
+  const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();
+  assert.equal(await p.locator('#nav-duplicates').textContent(),'1');
+  await p.locator('[data-duplicate-scope="other"]').click();
+  assert.match(await p.locator('#duplicates-list').textContent(),/Динамический компонент/);
+  assert.equal(await p.locator('[data-duplicate="other"]').isDisabled(),true);
+  assert.doesNotMatch(await p.locator('#duplicate-scope-info').textContent(),/можно подтвердить/);
+  assert.equal((await calls(p,'set_maf_decision')).length,0);
+});
