@@ -402,14 +402,12 @@ class AnalyzerTest < Minitest::Test
     one = FakeDefinition.new('Урна', [], { ['MafLibrary', 'catalog_id'] => 'bin-1', ['MafLibrary', 'source_sha'] => 'abc' })
     two = FakeDefinition.new('Урна', [Object.new], { ['MafLibrary', 'catalog_id'] => 'bin-1', ['MafLibrary', 'source_sha'] => 'abc' })
     report = MafLibrary::Analyzer.new(FakeModel.new([Sketchup::ComponentInstance.new(one), Sketchup::ComponentInstance.new(two)])).scan
-    assert_equal 1, report['duplicates'].length
-    assert_equal 'candidate', report['duplicates'].first['classification']
-    refute report['duplicates'].first['replaceable']
+    assert_empty report['duplicates']
   end
 
   def test_unknown_and_catalog_definition_with_same_geometry_are_candidates
-    catalog = FakeDefinition.new('Каталожная скамья', [Object.new], { ['MafLibrary', 'catalog_id'] => 'bench-1', ['MafLibrary', 'source_sha'] => 'abc' })
-    unknown = FakeDefinition.new('Скамья из старого проекта', [Object.new])
+    catalog = FakeDefinition.new('Каталожная скамья', [FakeEdge.new], { ['MafLibrary', 'catalog_id'] => 'bench-1', ['MafLibrary', 'source_sha'] => 'abc' })
+    unknown = FakeDefinition.new('Скамья из старого проекта', [FakeEdge.new])
     report = MafLibrary::Analyzer.new(FakeModel.new([Sketchup::ComponentInstance.new(catalog), Sketchup::ComponentInstance.new(unknown)])).scan
     assert_equal 1, report['duplicates'].length
     assert_match(/проверить вручную/, report['duplicates'].first['confidence'])
@@ -730,7 +728,7 @@ class ControllerTest < Minitest::Test
     @dialog = FakeDialog.new
     @controller = MafLibrary::Controller.allocate
     @controller.instance_variable_set(:@dialog, @dialog)
-    @controller.instance_variable_set(:@settings, Struct.new(:sections, :paths, :cloud_url).new([], {}, ''))
+    @controller.instance_variable_set(:@settings, Struct.new(:sections, :paths, :cloud_url, :ignored_duplicate_pairs).new([], {}, '', []))
     @controller.instance_variable_set(:@catalogs, Struct.new(:entries).new([]))
     @controller.instance_variable_set(:@selected_row_ids, [])
     @controller.instance_variable_set(:@selection_observer, MafLibrary::ListSelectionObserver.new(@controller))

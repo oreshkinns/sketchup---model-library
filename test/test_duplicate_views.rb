@@ -157,7 +157,10 @@ class DuplicateViewsTest < Minitest::Test
         {['MafLibrary', 'maf_decision'] => 'confirmed'})
     end
     report = MafLibrary::Analyzer.new(FakeModel.new(parents.map { |parent| Sketchup::ComponentInstance.new(parent) })).scan
-    assert report['duplicates'].any? { |group| group['definitions'].map { |entry| entry['id'] }.sort == [first, second, bridge].map { |part| part.object_id.to_s }.sort }
+    # Matching names must not bridge different geometry into one candidate.
+    # Only the two complete two-edge geometries are legitimate hints.
+    assert report['duplicates'].any? { |group| group['definitions'].map { |entry| entry['id'] }.sort == [second, bridge].map { |part| part.object_id.to_s }.sort }
+    refute report['duplicates'].any? { |group| group['definitions'].any? { |entry| entry['id'] == first.object_id.to_s } }
     MafLibrary::ModelRecognition.new(report, catalog_entries: []).apply
     session = MafLibrary::DuplicateViews.new(report).start
     5_000.times { break if session.step(max_items: 1) }
@@ -191,8 +194,10 @@ class DuplicateViewsTest < Minitest::Test
       exact_match['definitions'].map { |entry| entry['id'] }.sort
   end
 
-  def test_scoped_hint_candidates_keep_sampling_warning
-    parts = [97, 98].map { |count| FakeDefinition.new('Bolt', Array.new(count) { FakeEdge.new }) }
+  def test_scoped_sampled_signature_candidates_keep_sampling_warning
+    # Identical sampled signatures retain their warning. A name alone cannot
+    # produce a candidate when the sampled geometries differ.
+    parts = ['Bolt A', 'Unrelated name'].map { |name| FakeDefinition.new(name, Array.new(97) { FakeEdge.new }) }
     parent = FakeDefinition.new('MAF', parts.map { |part| Sketchup::ComponentInstance.new(part) },
       {['MafLibrary', 'maf_decision'] => 'confirmed'})
     report = MafLibrary::Analyzer.new(FakeModel.new([Sketchup::ComponentInstance.new(parent)])).scan
@@ -205,5 +210,18 @@ class DuplicateViewsTest < Minitest::Test
     refute match['replaceable']
     assert_match(/выбороч/, match['confidence'])
     assert_match(/выборку/, match['reasons'].join)
+  end
+
+  def test_scoped_sampled_geometries_are_not_linked_by_name_alone
+    parts = [97, 98].map { |count| FakeDefinition.new('Bolt', Array.new(count) { FakeEdge.new }) }
+    parent = FakeDefinition.new('MAF', parts.map { |part| Sketchup::ComponentInstance.new(part) },
+      {['MafLibrary', 'maf_decision'] => 'confirmed'})
+    report = MafLibrary::Analyzer.new(FakeModel.new([Sketchup::ComponentInstance.new(parent)])).scan
+    parts.each { |part| assert report['references'].fetch(part.object_id)[:signature_sampled] }
+    MafLibrary::ModelRecognition.new(report, catalog_entries: []).apply
+    session = MafLibrary::DuplicateViews.new(report).start
+    5_000.times { break if session.step(max_items: 1) }
+    assert session.done?
+    assert_empty report['nested_duplicates']
   end
 end

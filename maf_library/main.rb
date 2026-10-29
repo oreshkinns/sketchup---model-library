@@ -9,6 +9,8 @@ require_relative 'catalog_manager'
 require_relative 'cloud_catalog'
 require_relative 'analyzer'
 require_relative 'duplicate_views'
+require_relative 'duplicate_decisions'
+require_relative 'placement_browser'
 require_relative 'model_recognition'
 require_relative 'catalog_sync'
 require_relative 'replacement'
@@ -51,7 +53,7 @@ module MafLibrary
     end
 
     def onTransactionCommit(model)
-      @controller.report_stale(model)
+      @controller.report_transaction_commit(model)
     end
 
     def onTransactionUndo(model)
@@ -61,9 +63,9 @@ module MafLibrary
     alias_method :onTransactionRedo, :onTransactionUndo
 
     def onActivePathChanged(model)
-      # Entering edit context does not create a user transaction. Preserve the
-      # read-only reconciliation state left by Undo/Redo.
-      @controller.report_stale(model, read_only: nil)
+      # Placement navigation can dispatch this after active_path= returns.
+      # Other context changes retain the Undo/Redo reconciliation state.
+      @controller.report_active_path_changed(model)
     end
   end
 
@@ -151,8 +153,34 @@ module MafLibrary
       @selection_timer_id = timer_id
     end
 
+    def report_transaction_commit(changed_model)
+      # SketchUp commits its active_path= context operation synchronously.
+      # This guard exists only while focusing a validated placement path; actual
+      # user edits after navigation must always invalidate the report.
+      return if @placement_navigation && changed_model.equal?(model)
+      report_stale(changed_model)
+    end
+
+    def remember_placement_navigation(current_model)
+      @expected_placement_context = [current_model, Array(current_model.active_path).map(&:object_id)]
+    end
+
+    def report_active_path_changed(changed_model)
+      return if @placement_navigation
+      expected = @expected_placement_context
+      if expected && expected.first.equal?(changed_model) && expected.last == Array(changed_model.active_path).map(&:object_id)
+        # SketchUp may dispatch this notification after active_path= returns,
+        # sometimes more than once. Keep the expected context until another
+        # context or a real transaction invalidates it.
+        return
+      end
+      @expected_placement_context = nil
+      report_stale(changed_model, read_only: nil)
+    end
+
     def report_stale(changed_model = model, read_only: false)
       return if changed_model != model || @service_writing || @panel_closed
+      @expected_placement_context = nil
       # Native transaction-start callbacks are deferred until commit, so they
       # cannot safely prove that a delayed timer can append a transparent write.
       # Keep ordinary persistent writes, but never regenerate them after Undo.
@@ -218,6 +246,40 @@ module MafLibrary
       end
       @dialog.add_action_callback('export_report') { |_context| safely { export_report } }
       @dialog.add_action_callback('select_rows') { |_context, ids| safely { select_rows(ids) } }
+      @dialog.add_action_callback('set_duplicate_ignored') do |_context, group_id, left_id, right_id, ignored|
+        safely { set_duplicate_ignored(group_id.to_s, left_id.to_s, right_id.to_s, ignored == true) }
+      end
+      @dialog.add_action_callback('reset_duplicate_ignored') do |_context|
+        safely do
+          report = fresh_report
+          @settings.reset_ignored_duplicate_pairs
+          publish_duplicate_decisions(report)
+        end
+      end
+      @dialog.add_action_callback('list_placements') do |_context, definition_id, offset, token|
+        safely do
+          report = fresh_report
+          @placement_browser = PlacementBrowser.new(model, report) unless @placement_browser && @placement_browser.report.equal?(report)
+          push(placements: @placement_browser.page(definition_id.to_s, offset.to_i).merge('request_token' => token))
+        end
+      end
+      @dialog.add_action_callback('focus_placement') do |_context, id, token|
+        safely do
+          report = fresh_report
+          raise 'Повторите список размещений' unless @placement_browser && @placement_browser.report.equal?(report)
+          @syncing_selection = true
+          begin
+            @placement_navigation = true
+            count = @placement_browser.focus(id.to_s, token.to_s)
+            @expected_selection_ids = model.selection.map(&:object_id).sort
+            push(message: "В фокусе размещений: #{count}.")
+          ensure
+            remember_placement_navigation(model) if @placement_navigation
+            @syncing_selection = false
+            @placement_navigation = false
+          end
+        end
+      end
       @dialog.add_action_callback('focus_duplicates') do |_context, ids|
         safely { focus_duplicates(ids) }
       end
@@ -521,13 +583,17 @@ module MafLibrary
     def finish_scan(job)
       return unless @scan_job.equal?(job)
       report = job[:report]
+      DuplicateDecisions.apply(report, @settings, model)
+      report['placement_groups'] = report.fetch('references', {}).filter_map do |id, item|
+        {'id' => id.to_s, 'definition_id' => id.to_s, 'name' => item[:name], 'instances' => item[:placements]} if item[:placements].to_i > 1
+      end
       @last_report = report
       @cleanup_references = job[:unused_references]
       @report_stale = false
       @refreshing = false
       @scan_job = nil
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - job[:started_at]
-      data = report.reject { |key, _value| key == 'references' || key == 'structural_references' }
+      data = report.reject { |key, _value| key == 'references' || key == 'structural_references' || key.start_with?('_') }
       data['catalog'] = job[:cards]
       data['sections'] = @settings.sections
       data['settings'] = @settings.paths.merge('cloud_url' => @settings.cloud_url)
@@ -759,6 +825,25 @@ module MafLibrary
       push(selected_rows: @selected_row_ids, message: "Выделено строк: #{@selected_row_ids.length}; объектов в сцене: #{count}.")
     ensure
       @syncing_selection = false
+    end
+
+    def set_duplicate_ignored(group_id, left_id, right_id, ignored)
+      report = fresh_report
+      groups = duplicate_groups(report) + Array(report['ignored_duplicates'])
+      group = groups.find { |candidate| candidate['id'].to_s == group_id }
+      ids = [left_id, right_id].uniq
+      raise 'Выберите пару из текущего отчета' unless group && ids.length == 2 && (ids - group['definitions'].map { |entry| entry['id'].to_s }).empty?
+      validate_report_definitions(report, ids)
+      identities = ids.map { |id| DuplicateDecisions.identity(report.fetch('references').fetch(id.to_i), model) }
+      raise 'Стабильная идентификация пары недоступна' unless identities.all?
+      key = DuplicateDecisions.pair_key(identities)
+      @settings.set_ignored_duplicate_pair(key, ignored)
+      publish_duplicate_decisions(report)
+    end
+
+    def publish_duplicate_decisions(report)
+      DuplicateDecisions.apply(report, @settings, model)
+      push(duplicate_decisions: report.select { |key, _| %w[duplicates nested_duplicates ignored_duplicates summary].include?(key) })
     end
 
     def focus_duplicates(ids)

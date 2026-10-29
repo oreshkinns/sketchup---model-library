@@ -2,8 +2,8 @@ require_relative 'test_core'
 
 class AccountingPathsTest < Minitest::Test
   def test_candidates_do_not_reduce_unique_model_count
-    first = FakeDefinition.new('Скамья', [Object.new])
-    second = FakeDefinition.new('Скамья', [Object.new, Object.new])
+    first = FakeDefinition.new('Скамья', [FakeEdge.new], {['MafLibrary', 'category'] => 'a'})
+    second = FakeDefinition.new('Скамья', [FakeEdge.new], {['MafLibrary', 'category'] => 'b'})
     report = MafLibrary::Analyzer.new(FakeModel.new([
       Sketchup::ComponentInstance.new(first), Sketchup::ComponentInstance.new(second)
     ])).scan

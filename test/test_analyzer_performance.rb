@@ -23,7 +23,7 @@ class AnalyzerPerformanceTest < Minitest::Test
 
   def test_candidate_discovery_reads_each_definition_structure_once
     definitions = 12.times.map do |index|
-      entities = CountingEntities.new([Object.new])
+      entities = CountingEntities.new([FakeEdge.new])
       FakeDefinition.new("Item #{index}", entities, {['MafLibrary', 'category'] => "unique-#{index}"})
     end
     model = FakeModel.new(definitions.map { |definition| Sketchup::ComponentInstance.new(definition) })
@@ -52,7 +52,7 @@ class AnalyzerPerformanceTest < Minitest::Test
     assert_operator CountingInstance.comparisons, :<=, 2 * placements.length
   end
 
-  def test_candidate_links_remain_transitive_across_name_bounds_and_structure
+  def test_name_bounds_structure_do_not_transitively_link_unrelated_geometry
     definitions = [
       FakeDefinition.new('Same', [Object.new]),
       FakeDefinition.new('Same', [Object.new, Object.new]),
@@ -65,9 +65,7 @@ class AnalyzerPerformanceTest < Minitest::Test
     end
     report = MafLibrary::Analyzer.new(FakeModel.new(definitions.map { |definition| Sketchup::ComponentInstance.new(definition) })).scan
 
-    assert_equal 1, report.fetch('duplicates').length
-    assert_equal definitions.map(&:object_id).map(&:to_s).sort,
-      report.fetch('duplicates').first.fetch('definitions').map { |entry| entry.fetch('id') }.sort
+    assert_empty report.fetch('duplicates')
   end
 
   def test_candidate_name_matching_preserves_casecmp_behavior_for_non_ascii_names

@@ -163,31 +163,24 @@ module MafLibrary
               @phase = :candidate_components
               next
             end
-            if @candidate_entities.nil?
-              @candidate_entities = @items[@candidate_index][:definition].entities
-              @candidate_counts = Hash.new(0)
-              @candidate_entity_index = 0
-              @candidate_failed = false
-            end
-            if @candidate_entity_index < @candidate_entities.length
-              begin
-                entity = @candidate_entities[@candidate_entity_index]
-                @candidate_counts[entity.class.name] += 1
-              rescue StandardError
-                @candidate_failed = true
-                @candidate_entity_index = @candidate_entities.length
-              end
-              @candidate_entity_index += 1
-              budget -= 1
-            else
-              budget -= 1
-            end
-            if @candidate_entity_index >= @candidate_entities.length
-              token = @candidate_failed ? nil : [@candidate_entities.length, @candidate_counts.sort]
-              item = @items[@candidate_index]
-              register_candidate_hints(item, @unmatched_indexes[item[:definition].object_id], token)
+            @geometry_reader ||= DefinitionSignature.new(mode: :geometry)
+            item = @items[@candidate_index]
+            if item[:signature_sampled]
+              item[:candidate_hints] = []
               @candidate_index += 1
-              @candidate_entities = nil
+              budget -= 1
+              next
+            end
+            @geometry_session ||= @geometry_reader.start_call(item[:definition])
+            finished = @geometry_session.step(max_entities: [budget, 1].max, deadline: deadline)
+            budget -= [@geometry_session.processed, 1].max
+            if finished
+              signature = @geometry_session.result
+              item[:geometry_signature] = signature[:digest]
+              item[:geometry_complete] = signature[:complete] && !signature[:sampled]
+              register_candidate_hints(item, @unmatched_indexes[item[:definition].object_id], signature)
+              @candidate_index += 1
+              @geometry_session = nil
             end
           when :candidate_components
             if @candidate_component_index >= @unmatched.length
@@ -208,7 +201,7 @@ module MafLibrary
             component = @candidate_component_values[@candidate_group_index]
             if component.length > 1
               @groups << @analyzer.__send__(:make_group, component, 'candidate', false,
-                ['Совпадает имя или габариты; требуется полная проверка'], hint_match: true)
+                ['Совпадает геометрия; материалы и свойства могут отличаться'], hint_match: true)
             end
             @candidate_group_index += 1
             budget -= 1
@@ -269,13 +262,10 @@ module MafLibrary
       end
 
       def register_candidate_hints(item, index, structure)
-        kind = item[:kind]
-        name = item[:name].to_s
-        bounds = @analyzer.__send__(:bounds_token, item[:definition])
         hints = []
-        hints << [kind, :name, name.downcase(:ascii)] unless name.empty?
-        hints << [kind, :bounds, bounds] unless bounds.empty?
-        hints << [kind, :structure, structure]
+        if structure && structure[:digest] && structure[:complete] && !structure[:sampled]
+          hints << [item[:kind], :geometry, structure[:digest]]
+        end
         # Scoped matching needs evidence even when this definition matched an
         # exact copy elsewhere. Global candidate classification stays unchanged.
         item[:candidate_hints] = hints
@@ -546,7 +536,7 @@ module MafLibrary
       components = Hash.new { |hash, key| hash[key] = [] }
       unmatched.each_with_index { |item, index| components[find_root.call(index)] << item }
       components.each_value do |component|
-        groups << make_group(component, 'candidate', false, ['Совпадает имя или габариты; требуется полная проверка'], hint_match: true) if component.length > 1
+        groups << make_group(component, 'candidate', false, ['Совпадает геометрия; материалы и свойства могут отличаться'], hint_match: true) if component.length > 1
       end
       groups.sort_by { |group| [group['classification'] == 'confirmed' ? 0 : 1, group['label']] }
     end

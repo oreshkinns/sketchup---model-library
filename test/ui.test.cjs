@@ -227,8 +227,8 @@ test('large reports render only the active page with bounded reachable batches',
   await p.evaluate(()=>MAF.receive({report_stale:false}));
   await p.locator('.nav [data-page="duplicates"]').click();
   assert.equal(await p.locator('#models-body tr').count(),0);
-  assert.ok(await p.locator('.duplicate').count()<=100);
-  for(let i=0;i<3;i++)await p.locator('[data-page-next="duplicates"]').click();
+  assert.ok(await p.locator('.duplicate').count()<=10);
+  for(let i=0;i<34;i++)await p.locator('[data-page-next="duplicates"]').click();
   await p.locator('[data-duplicate-choice][value="349"]').check();
   await p.locator('#focus-duplicates').click();
   assert.deepEqual((await calls(p,'focus_duplicates')).at(-1),['focus_duplicates',['349']]);
@@ -722,4 +722,58 @@ test('CEF64: demo startup and reconciliation work without Array flatMap', async 
   await p.locator('[data-action="delete"]').click();
   await p.locator('#confirm').click();
   assert.equal(await p.locator('[data-node="yard/3"]').count(), 0);
+});
+
+test('large duplicate comparison pages definitions and patches previews without replacing cards',async t=>{
+ const data=fixture();data.duplicates=[{id:'huge',label:'Huge',classification:'similar',replaceable:false,definitions:Array.from({length:2041},(_,i)=>({id:String(i),name:'Part '+i,instances:1}))}];
+ const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();
+ assert.equal(await p.locator('.duplicate-comparison tbody tr').count(),20);
+ assert.equal(await p.locator('[data-duplicate-choice]').count(),20);
+ await p.evaluate(()=>window.savedCard=document.querySelector('.duplicate'));
+ await p.locator('[data-load-previews]').click();const request=(await calls(p,'duplicate_previews')).at(-1);
+ assert.equal(request[2].length,20);
+ await p.evaluate(request=>MAF.receive({duplicate_previews:{group_id:request[1],ids:request[2],token:request[3],images:{'0':'data:image/png;base64,AA=='}}}),request);
+ assert.equal(await p.evaluate(()=>window.savedCard===document.querySelector('.duplicate')),true);
+ for(let i=0;i<102;i++)await p.locator('[data-definition-next]').click();
+ assert.equal(await p.locator('[data-duplicate-choice][value="2040"]').count(),1);
+ assert.equal(await p.locator('.duplicate-comparison tbody tr').count(),1);
+});
+
+test('ignored duplicate pairs dispatch exact definitions and restore/reset without replacement',async t=>{
+ const data=fixture();const group={id:'pair',label:'Pair',replaceable:false,definitions:[{id:'1',name:'A'},{id:'2',name:'B'}]};data.duplicates=[group];data.ignored_duplicates=[group];
+ const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();await p.locator('[data-ignore-pair]').click();
+ assert.deepEqual((await calls(p,'set_duplicate_ignored')).at(-1),['set_duplicate_ignored','pair','1','2',true]);
+ await p.locator('[data-duplicate-scope="ignored"]').click();await p.locator('[data-ignore-pair]').click();
+ assert.deepEqual((await calls(p,'set_duplicate_ignored')).at(-1),['set_duplicate_ignored','pair','1','2',false]);
+ await p.locator('#reset-ignored').click();assert.equal((await calls(p,'reset_duplicate_ignored')).length,1);
+ await p.evaluate(()=>MAF.receive({report_stale:true}));assert.equal(await p.locator('[data-ignore-pair]').isDisabled(),true);
+});
+
+test('placement groups paginate separately and focus exact occurrence with report token',async t=>{
+ const data=fixture();data.placement_groups=Array.from({length:21},(_,i)=>({id:String(i),definition_id:String(i),name:'Shared '+i,instances:120}));
+ const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();await p.locator('[data-duplicate-scope="placements"]').click();assert.equal(await p.locator('[data-list-placements]').count(),10);
+ await p.locator('[data-page-next="duplicates"]').click();await p.locator('[data-list-placements="10"]').click();
+ const request=(await calls(p,'list_placements')).at(-1);assert.deepEqual(request.slice(0,3),['list_placements','10',0]);
+ const response={report_token:'report-1',definition_id:'10',offset:0,limit:50,total:120,request_token:request[3],items:[{id:'path:1/2',name:'First',path:['Parent','First']},{id:'path:1/3',name:'Second',path:['Parent','Second']}]};
+ await p.evaluate(placements=>MAF.receive({placements}),response);await p.locator('[data-focus-placement="path:1/3"]').click();assert.deepEqual((await calls(p,'focus_placement')).at(-1),['focus_placement','path:1/3','report-1']);
+ await p.locator('[data-placement-offset="50"]').click();assert.equal((await calls(p,'list_placements')).at(-1)[2],50);
+ await p.evaluate(placements=>MAF.receive({placements}),response);assert.equal(await p.locator('[data-focus-placement]').count(),0);
+ await p.evaluate(()=>MAF.receive({report_stale:true}));assert.equal(await p.locator('[data-list-placements="10"]').isDisabled(),true);
+});
+
+test('a chosen pair in a larger group excludes only those two definitions',async t=>{
+ const data=fixture();data.duplicates=[{id:'many',label:'Many',definitions:[{id:'1',name:'A'},{id:'2',name:'B'},{id:'3',name:'C'}]},{id:'other',label:'Other',definitions:[{id:'4',name:'D'},{id:'5',name:'E'},{id:'6',name:'F'}]}];
+ const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();
+ await p.locator('[data-duplicate-choice][value="1"]').check();await p.locator('[data-duplicate-choice][value="4"]').check();
+ assert.equal(await p.locator('[data-ignore-group]').nth(0).isDisabled(),true);
+ await p.locator('[data-duplicate-choice][value="3"]').check();assert.equal(await p.locator('[data-ignore-group]').nth(0).isDisabled(),false);
+ await p.locator('[data-ignore-group]').nth(0).click();assert.deepEqual((await calls(p,'set_duplicate_ignored')).at(-1),['set_duplicate_ignored','many','1','3',true]);
+ assert.equal(await p.locator('[data-ignore-group]').nth(1).isDisabled(),true);
+});
+
+test('pair decision response preserves library and settings and invalidates stale confirmations',async t=>{
+ const data=fixture();data.duplicates=[{id:'pair',label:'Pair',replaceable:true,definitions:[{id:'1',name:'A'},{id:'2',name:'B'}]}];
+ const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();await p.locator('[data-duplicate]').click();
+ await p.evaluate(()=>MAF.receive({duplicate_decisions:{duplicates:[],nested_duplicates:[],ignored_duplicates:[],summary:{}}}));assert.equal(await p.locator('#confirm').isDisabled(),true);
+ await p.keyboard.press('Escape');await p.locator('.nav [data-page="catalog"]').click();assert.equal(await p.locator('.catalog-card').count(),2);
 });

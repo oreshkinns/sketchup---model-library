@@ -24,7 +24,7 @@ module MafLibrary
         @structural = report['structural_references'] || {}
         @structural_ids = {}
         @signature_reader = DefinitionSignature.new(mode: :duplicate)
-        @comparison_reader = DefinitionSignature.new(mode: :catalog)
+        @comparison_reader = DefinitionSignature.new(mode: :geometry)
         @signature_buckets = Hash.new { |hash, key| hash[key] = [] }
         @exact_buckets = Hash.new { |hash, key| hash[key] = [] }
         @owners = {}
@@ -161,7 +161,7 @@ module MafLibrary
                 group = {'id' => "hints:#{members.map { |entry, _count| entry['id'] }.join(',')}",
                   'kind' => key.last, 'classification' => 'candidate', 'replaceable' => false,
                   'confidence' => sampled ? 'Геометрия проверена выборочно · обязательно проверьте вручную' : 'Возможный дубль · проверить вручную',
-                  'reasons' => ['Совпадает имя или габариты; требуется полная проверка']}
+                  'reasons' => ['Совпадает геометрия; материалы и свойства могут отличаться']}
                 group['reasons'] << 'Сигнатура содержит выборку; автоматическое объединение запрещено' if sampled
                 @results << scoped_group(group, key[0], key[1], members)
               end

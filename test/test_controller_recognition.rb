@@ -912,6 +912,47 @@ class ControllerRecognitionTest < Minitest::Test
     assert_empty UI.timers
   end
 
+  def test_synchronous_placement_context_transaction_preserves_report
+    @controller.send(:panel_ready)
+    analyze
+    @controller.instance_variable_set(:@placement_navigation, true)
+    @model.emit(:onTransactionCommit)
+    @model.emit(:onActivePathChanged)
+    refute @controller.instance_variable_get(:@report_stale)
+    @controller.instance_variable_set(:@placement_navigation, false)
+    @model.emit(:onTransactionCommit)
+    assert @controller.instance_variable_get(:@report_stale)
+  ensure
+    @controller.instance_variable_set(:@placement_navigation, false)
+  end
+
+  def test_delayed_placement_context_events_preserve_report_but_real_edits_invalidate_it
+    @controller.send(:panel_ready)
+    analyze
+    context = [Object.new]
+    @model.define_singleton_method(:active_path) { context }
+    @controller.remember_placement_navigation(@model)
+    # Deferred callbacks arrive after the focus action's synchronous guard ends.
+    @controller.instance_variable_set(:@placement_navigation, false)
+    2.times { @model.emit(:onActivePathChanged) }
+    refute @controller.instance_variable_get(:@report_stale)
+    @model.emit(:onTransactionCommit)
+    assert @controller.instance_variable_get(:@report_stale)
+    assert_nil @controller.instance_variable_get(:@expected_placement_context)
+  end
+
+  def test_user_navigation_after_placement_context_invalidates_report
+    @controller.send(:panel_ready)
+    analyze
+    context = [Object.new]
+    @model.define_singleton_method(:active_path) { context }
+    @controller.remember_placement_navigation(@model)
+    context = [Object.new]
+    @model.emit(:onActivePathChanged)
+    assert @controller.instance_variable_get(:@report_stale)
+    assert_nil @controller.instance_variable_get(:@expected_placement_context)
+  end
+
   def test_editing_component_invalidates_report_without_queuing_analysis
     @controller.send(:panel_ready)
     analyze

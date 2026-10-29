@@ -15,7 +15,7 @@ module MafLibrary
 
     # A reader belongs to one analysis pass; create a new reader after edits.
     def initialize(mode: :duplicate)
-      raise ArgumentError, 'Unknown signature mode' unless [:duplicate, :catalog].include?(mode)
+      raise ArgumentError, 'Unknown signature mode' unless [:duplicate, :catalog, :geometry].include?(mode)
       @mode = mode
       @signature_cache = {}
       @signature_complete = {}
@@ -224,6 +224,7 @@ module MafLibrary
                ['unknown', entity.class.name]
              end
       core << edge_topology_token(entity) if @mode == :catalog && defined?(Sketchup::Edge) && entity.is_a?(Sketchup::Edge)
+      return core if @mode == :geometry
       core + [material_token(entity, :material), material_token(entity, :back_material),
               entity_state_token(entity), attributes_token(entity)]
     rescue StandardError
@@ -287,6 +288,7 @@ module MafLibrary
     end
 
     def entity_state_token(entity)
+      return {} if @mode == :geometry
       state = {}
       if @mode == :catalog
         %i[soft? smooth?].each { |method| state[method] = entity.public_send(method) if entity.respond_to?(method) }
@@ -306,6 +308,7 @@ module MafLibrary
     end
 
     def attributes_token(object, definition_context: false)
+      return [] if @mode == :geometry
       return [] unless object.respond_to?(:attribute_dictionaries)
       dictionaries = object.attribute_dictionaries
       return [] unless dictionaries
@@ -324,6 +327,7 @@ module MafLibrary
     end
 
     def behavior_token(definition)
+      return {} if @mode == :geometry
       return {} unless definition.respond_to?(:behavior)
       behavior = definition.behavior
       methods = if @mode == :catalog
@@ -366,17 +370,18 @@ module MafLibrary
     end
 
     def point_token(point)
-      return point.to_a.map(&:to_f) if @mode == :catalog
+      return point.to_a.map(&:to_f) if [:catalog, :geometry].include?(@mode)
       point.to_a.map { |value| (value.to_f / POINT_TOLERANCE_INCHES).round }
     end
 
     def transform_token(entity)
       return [] unless entity.respond_to?(:transformation)
-      return entity.transformation.to_a.map(&:to_f) if @mode == :catalog
+      return entity.transformation.to_a.map(&:to_f) if [:catalog, :geometry].include?(@mode)
       entity.transformation.to_a.map { |value| (value.to_f / TRANSFORM_TOLERANCE).round }
     end
 
     def material_token(entity, method)
+      return '' if @mode == :geometry
       return '' unless entity.respond_to?(method)
       material = entity.public_send(method)
       return '' unless material
@@ -402,6 +407,7 @@ module MafLibrary
     # same pixels. Until texture bytes are compared, matching signatures that
     # contain textures are review candidates only.
     def textured?(entity)
+      return false if @mode == :geometry
       %i[material back_material].any? do |method|
         entity.respond_to?(method) && (material = entity.public_send(method)) &&
           MATERIAL_TEXTURES.any? { |property| material.respond_to?(property) && material.public_send(property) }

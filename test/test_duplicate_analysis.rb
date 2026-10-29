@@ -39,13 +39,45 @@ class DuplicateAnalysisTest < Minitest::Test
     assert_includes group['reasons'].join(' '), 'выбор'
   end
 
-  def test_same_name_with_different_signature_is_candidate_not_confirmed
+  def test_same_name_with_different_geometry_does_not_create_candidate
     first = definition('Seat', [edge(0, 10)])
     second = definition('Seat', [edge(0, 11)])
-    group = scan(first, second)['duplicates'].first
+    assert_empty scan(first, second)['duplicates']
+  end
 
+  def test_geometry_candidate_ignores_names_and_materials_but_never_allows_replacement
+    first_edge, second_edge = edge(0, 10), edge(0, 10)
+    material = Struct.new(:name, :color, :alpha, :texture)
+    first_edge.define_singleton_method(:material) { material.new('Red', [255, 0, 0], 1, nil) }
+    second_edge.define_singleton_method(:material) { material.new('Blue', [0, 0, 255], 1, nil) }
+    first = definition('Seat', [first_edge])
+    second = definition('Unrelated name', [second_edge])
+    report = scan(first, second)
+    group = report['duplicates'].fetch(0)
     assert_equal 'candidate', group['classification']
-    assert_equal false, group['replaceable']
+    refute group['replaceable']
+    assert_equal 2, group['definitions'].length
+    reader = MafLibrary::DefinitionSignature.new(mode: :geometry)
+    assert_equal reader.call(first)[:digest], reader.call(second)[:digest]
+    incremental = MafLibrary::DefinitionSignature.new(mode: :geometry).start_call(second)
+    incremental.step(max_entities: 1) until incremental.done?
+    assert_equal reader.call(second)[:digest], incremental.result[:digest]
+  end
+
+  def test_texture_differences_do_not_hide_geometry_candidates
+    first_edge, second_edge = edge(0, 10), edge(0, 10)
+    texture = Struct.new(:filename, :width, :height)
+    material = Struct.new(:name, :color, :alpha, :texture)
+    first_edge.define_singleton_method(:material) { material.new('Wood', [0, 0, 0], 1, texture.new('wood.jpg', 10, 10)) }
+    second_edge.define_singleton_method(:material) { material.new('Stone', [0, 0, 0], 1, texture.new('stone.jpg', 20, 20)) }
+    report = scan(definition('Wooden', [first_edge]), definition('Stone', [second_edge]))
+    group = report['duplicates'].fetch(0)
+    assert_equal 'candidate', group['classification']
+    refute group['replaceable']
+    reader = MafLibrary::DefinitionSignature.new(mode: :geometry)
+    result = reader.call(definition('Textured', [first_edge]))
+    assert result[:complete]
+    refute MafLibrary::DefinitionSignature.new(mode: :duplicate).call(definition('Exact', [first_edge]))[:complete]
   end
 
   def test_matching_catalog_identity_includes_version_and_sha

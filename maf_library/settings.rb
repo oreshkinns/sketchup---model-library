@@ -117,6 +117,24 @@ module MafLibrary
       raise ArgumentError, 'Некорректный адрес облачного каталога'
     end
 
+    def ignored_duplicate_pairs
+      Array(data['ignored_duplicate_pairs'])
+    end
+
+    def set_ignored_duplicate_pair(key, ignored)
+      current = data
+      values = Array(current['ignored_duplicate_pairs']) - [key]
+      values << key if ignored
+      current['ignored_duplicate_pairs'] = values
+      write(current)
+    end
+
+    def reset_ignored_duplicate_pairs
+      current = data
+      current['ignored_duplicate_pairs'] = []
+      write(current)
+    end
+
     private
 
     def same_directory?(first, second)
