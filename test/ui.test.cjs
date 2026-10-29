@@ -34,6 +34,39 @@ return page;
 async function calls(page,name){return page.evaluate(name=>window.calls.filter(x=>x[0]===name),name);
 }
 
+test('manual candidate replacement requires bound preview and explicit acceptance',async t=>{
+  const data=fixture();data.duplicates=[];data.other_duplicates=[{id:'candidate',label:'Screenshot component',kind:'component',classification:'candidate',confidence:'2 сходных определения',replaceable:false,definitions:[{id:'1',name:'Original A',instances:2},{id:'2',name:'Reference B',instances:3}]}];
+  const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();await p.locator('[data-duplicate-scope="other"]').click();
+  assert.equal(await p.locator('[data-duplicate]').isDisabled(),true);
+  await p.locator('[data-manual-duplicate]').click();
+  assert.equal(await p.locator('#confirm').isDisabled(),true);
+  assert.match(await p.locator('#modal-description').innerText(),/внутренние материалы.*Undo/);
+  await p.locator('#modal-select').selectOption('2');
+  const requests=await calls(p,'preview_manual_replace_duplicates');assert.equal(requests.length,2);assert.deepEqual(requests[1].slice(0,3),['preview_manual_replace_duplicates','candidate','2']);
+  const preview=(request,extra={})=>({token:request[3],group_id:'candidate',target_id:request[2],preview_token:'server-bound',plan:{sources:['Original A'],target:'Reference B',entities:2,placements:5,paths:['Outside / A','Shared / A'],warnings:[{name:'Original A',reason:'Dynamic parameters become reference content'},'Glued reference preserved'],blockers:[]},...extra});
+  await p.evaluate(payload=>MAF.receive({manual_replacement_preview:payload}),preview(requests[0]));await p.locator('#manual-accept').check();assert.equal(await p.locator('#confirm').isDisabled(),true);
+  await p.evaluate(payload=>MAF.receive({manual_replacement_preview:payload}),preview(requests[1]));
+  assert.match(await p.locator('#modal-summary').innerText(),/Outside \/ A.*Shared \/ A/);assert.equal(await p.locator('#confirm').isDisabled(),false);
+  assert.match(await p.locator('#modal-summary').innerText(),/Dynamic parameters become reference content.*Glued reference preserved/);assert.match(await p.locator('#manual-accept-field').innerText(),/динамических параметров.*атрибуты размещений/);
+  assert.equal((await calls(p,'manual_replace_duplicates')).length,0);
+  await p.locator('#confirm').click();assert.deepEqual((await calls(p,'manual_replace_duplicates')).at(-1),['manual_replace_duplicates','candidate','2','server-bound',true]);
+});
+
+test('manual replacement resets acceptance, honors blockers and stale reports',async t=>{
+  const data=fixture();data.duplicates=[{id:'candidate',label:'Candidate',kind:'component',replaceable:false,definitions:[{id:'1',name:'A'},{id:'2',name:'B'}]}];
+  const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();await p.locator('[data-manual-duplicate]').click();
+  async function respond(blockers=[]){const request=(await calls(p,'preview_manual_replace_duplicates')).at(-1);await p.evaluate(({request,blockers})=>MAF.receive({manual_replacement_preview:{token:request[3],group_id:request[1],target_id:request[2],preview_token:'bound',plan:{entities:2,placements:3,blockers}}}),{request,blockers});}
+  await respond();assert.equal(await p.locator('#confirm').isDisabled(),true);await p.locator('#manual-accept').check();assert.equal(await p.locator('#confirm').isDisabled(),false);
+  await p.locator('#modal-select').selectOption('2');assert.equal(await p.locator('#manual-accept').isChecked(),false);assert.equal(await p.locator('#confirm').isDisabled(),true);
+  await respond([{name:'A',reason:'Locked reference'}]);await p.locator('#manual-accept').check();assert.equal(await p.locator('#confirm').isDisabled(),true);assert.match(await p.locator('#modal-summary').innerText(),/Locked reference/);
+  await p.evaluate(()=>MAF.receive({report_stale:true}));await respond();assert.equal(await p.locator('#confirm').isDisabled(),true);assert.equal((await calls(p,'manual_replace_duplicates')).length,0);
+});
+
+test('manual replacement blocks unsafe groups but permits explicit global scope conflicts',async t=>{
+  const data=fixture();data.duplicates=[{id:'group',label:'Group',kind:'group',definitions:[{id:'1',name:'A'},{id:'2',name:'B'}]},{id:'conflict',label:'Conflict',scope_conflict:true,definitions:[{id:'1',name:'A'},{id:'2',name:'B'}]}];
+  const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();assert.equal(await p.locator('[data-manual-duplicate="group"]').isDisabled(),true);assert.equal(await p.locator('[data-manual-duplicate="conflict"]').isDisabled(),false);
+});
+
 test('duplicates open on whole MAFs and nested matches are separated by parent',async t=>{
   const data=fixture();
   data.duplicates=[{id:'whole',label:'Качели 1',classification:'confirmed',replaceable:true,definitions:[{id:'1',name:'Качели 1',instances:1},{id:'2',name:'Качели 2',instances:1}]}];

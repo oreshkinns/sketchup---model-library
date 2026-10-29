@@ -2,9 +2,10 @@ module MafLibrary
   class Replacement
     class Blocked < StandardError; end
 
-    def initialize(model, report)
+    def initialize(model, report, manual: false)
       @model = model
       @report = report
+      @manual = manual
     end
 
     def replace(sources, target, manage_operation: true)
@@ -52,9 +53,12 @@ module MafLibrary
         blocked << {entity: nil, reason: 'Масштабную копию разместите отдельно: автоматическая замена может повторно применить масштаб'}
       end
       blocked << {entity: nil, reason: 'Live Component нельзя использовать для замены'} if target.respond_to?(:live_component?) && target.live_component?
-      blocked << {entity: nil, reason: 'Динамический компонент нельзя использовать для замены'} if dynamic?(target)
+      blocked << {entity: nil, reason: 'Динамический компонент нельзя использовать для замены'} if dynamic?(target) && !@manual
       sources.each do |source|
-        blocked << {entity: nil, reason: 'Динамические компоненты требуют ручной проверки'} if dynamic?(source)
+        blocked << {entity: nil, reason: 'Динамические компоненты требуют ручной проверки'} if dynamic?(source) && !@manual
+        if @manual && behavior_state(source) != behavior_state(target)
+          blocked << {entity: nil, reason: 'Свойства приклеивания и вырезания проёмов отличаются; замените компонент вручную в SketchUp'}
+        end
         blocked << {entity: nil, reason: 'Live Component нельзя заменить автоматически'} if source.respond_to?(:live_component?) && source.live_component?
       end
       refs.each do |ref|
@@ -65,9 +69,9 @@ module MafLibrary
                    'Среди экземпляров есть заблокированные элементы'
                  elsif Array(ref[:ancestors]).include?(target.object_id)
                    'Замена создаст вложенную ссылку компонента на себя'
-                 elsif entity.respond_to?(:glued_to) && entity.glued_to
+                 elsif entity.respond_to?(:glued_to) && entity.glued_to && !@manual
                    'Приклеенные компоненты требуют ручной замены'
-                 elsif dynamic?(entity)
+                 elsif dynamic?(entity) && !@manual
                    'Экземпляры динамических компонентов требуют ручной проверки'
                  elsif unsafe_transform?(entity)
                    'Зеркальная или вырожденная трансформация требует ручной проверки'
@@ -82,6 +86,19 @@ module MafLibrary
 
     def dynamic?(entity)
       entity.respond_to?(:attribute_dictionary) && entity.attribute_dictionary('dynamic_attributes')
+    end
+
+    def behavior_state(definition)
+      return nil unless definition.respond_to?(:behavior)
+      behavior = definition.behavior
+      %i[cuts_opening? is2d? snapto always_face_camera? shadows_face_sun?].map do |key|
+        [key, behavior.respond_to?(key) ? behavior.public_send(key) : nil]
+      end
+    end
+
+    def instance_attributes(entity)
+      return [] unless entity.respond_to?(:attribute_dictionaries) && entity.attribute_dictionaries
+      entity.attribute_dictionaries.map { |dictionary| [dictionary.name, dictionary.to_a.sort_by { |pair| pair.first.to_s }] }.sort_by(&:first)
     end
 
     def unsafe_transform?(entity)
@@ -103,9 +120,17 @@ module MafLibrary
       refs.each do |ref|
         entity = ref[:entity]
         original_name = entity.name if entity.respond_to?(:name)
+        original_glue = entity.glued_to if @manual && entity.respond_to?(:glued_to)
+        original_transform = entity.transformation.to_a if @manual && entity.respond_to?(:transformation)
+        original_attributes = instance_attributes(entity) if @manual
         changed = entity.public_send(:definition=, target)
         raise 'SketchUp не изменил определение компонента' if changed == false
         entity.name = original_name if entity.respond_to?(:name=) && entity.name != original_name
+        if @manual
+          raise 'SketchUp изменил приклеивание компонента; замена отменена' if entity.respond_to?(:glued_to) && entity.glued_to != original_glue
+          raise 'SketchUp изменил трансформацию компонента; замена отменена' if original_transform && entity.transformation.to_a != original_transform
+          raise 'SketchUp изменил атрибуты экземпляра; замена отменена' if instance_attributes(entity) != original_attributes
+        end
       end
       @model.commit_operation if started
       {entities: refs.length, placements: placements}

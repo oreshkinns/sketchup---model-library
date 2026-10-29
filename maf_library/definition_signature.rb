@@ -14,9 +14,10 @@ module MafLibrary
     MATERIAL_TEXTURES = %i[texture ao_texture metallic_texture roughness_texture normal_texture].freeze
 
     # A reader belongs to one analysis pass; create a new reader after edits.
-    def initialize(mode: :duplicate)
+    def initialize(mode: :duplicate, full_snapshot: false)
       raise ArgumentError, 'Unknown signature mode' unless [:duplicate, :catalog, :geometry].include?(mode)
       @mode = mode
+      @full_snapshot = full_snapshot
       @signature_cache = {}
       @signature_complete = {}
       @signature_sampled = {}
@@ -125,11 +126,11 @@ module MafLibrary
       def push_frame(definition)
         entities = definition.entities
         length = entities.length
-        indexes = length <= SIGNATURE_SAMPLE_LIMIT ? (0...length).to_a :
+        indexes = @reader.instance_variable_get(:@full_snapshot) || length <= SIGNATURE_SAMPLE_LIMIT ? (0...length).to_a :
           (0...SIGNATURE_SAMPLE_LIMIT).map { |index| index * (length - 1) / (SIGNATURE_SAMPLE_LIMIT - 1) }
         @active[definition.object_id] = true
         @frames << {definition: definition, entities: entities, length: length, indexes: indexes,
-                    index: 0, tokens: [], sampled: length > SIGNATURE_SAMPLE_LIMIT, uncertain: false, textured: false}
+                    index: 0, tokens: [], sampled: !@reader.instance_variable_get(:@full_snapshot) && length > SIGNATURE_SAMPLE_LIMIT, uncertain: false, textured: false}
       rescue StandardError
         cache[definition.object_id] = nil
         complete[definition.object_id] = false
@@ -150,7 +151,8 @@ module MafLibrary
         complete[id] = !sampled[id] && !frame[:textured] && tokens.none?(&:nil?) &&
           tokens.none? { |token| @reader.__send__(:contains_unknown?, token) } && !@reader.instance_variable_get(:@uncertain)
         usable = tokens.none?(&:nil?) && tokens.none? { |token| @reader.__send__(:contains_unknown?, token) } && !@reader.instance_variable_get(:@uncertain)
-        cache[id] = @reader.instance_variable_get(:@mode) == :geometry && !usable ? nil : Digest::SHA256.hexdigest(JSON.generate(evidence))
+        fail_closed = @reader.instance_variable_get(:@mode) == :geometry || @reader.instance_variable_get(:@full_snapshot)
+        cache[id] = fail_closed && !usable ? nil : Digest::SHA256.hexdigest(JSON.generate(evidence))
       rescue StandardError
         cache[id] = nil
         complete[id] = false
@@ -170,13 +172,13 @@ module MafLibrary
       @uncertain = false
       entities = definition.entities
       length = entities.length
-      indexes = if length <= SIGNATURE_SAMPLE_LIMIT
+      indexes = if @full_snapshot || length <= SIGNATURE_SAMPLE_LIMIT
                   (0...length).to_a
                 else
                   (0...SIGNATURE_SAMPLE_LIMIT).map { |index| index * (length - 1) / (SIGNATURE_SAMPLE_LIMIT - 1) }
                 end
       tokens = indexes.map { |index| entity_token(entities[index], stack + [id]) }
-      sampled = length > SIGNATURE_SAMPLE_LIMIT
+      sampled = !@full_snapshot && length > SIGNATURE_SAMPLE_LIMIT
       complete = !sampled && tokens.none?(&:nil?) && tokens.none? { |token| contains_unknown?(token) } &&
         indexes.none? { |index| textured?(entities[index]) }
       @signature_sampled[id] = sampled || indexes.any? do |index|
@@ -192,7 +194,7 @@ module MafLibrary
       end
       @signature_complete[id] = complete && !@signature_sampled[id] && !@uncertain
       usable = tokens.none?(&:nil?) && tokens.none? { |token| contains_unknown?(token) } && !@uncertain
-      value = @mode == :geometry && !usable ? nil : Digest::SHA256.hexdigest(JSON.generate(evidence))
+      value = (@mode == :geometry || @full_snapshot) && !usable ? nil : Digest::SHA256.hexdigest(JSON.generate(evidence))
       @signature_cache[id] = value
     rescue StandardError
       @signature_complete[id] = false
@@ -213,7 +215,7 @@ module MafLibrary
     def entity_token(entity, stack)
       core = if entity.is_a?(Sketchup::ComponentInstance) || entity.is_a?(Sketchup::Group)
                nested_signature = signature(entity.definition, stack)
-               return nil if nested_signature.nil? || (@mode != :geometry && !@signature_complete[entity.definition.object_id])
+               return nil if nested_signature.nil? || (!@full_snapshot && @mode != :geometry && !@signature_complete[entity.definition.object_id])
                ['instance', entity.class.name, nested_signature, transform_token(entity)]
              elsif defined?(Sketchup::Edge) && entity.is_a?(Sketchup::Edge)
                ['edge', [point_token(entity.start.position), point_token(entity.end.position)].sort]
@@ -318,7 +320,7 @@ module MafLibrary
         # The native SKP loader injects model shadow/location context into the
         # imported root definition. It is not saved component geometry. Keep
         # all vendor dictionaries and entity attributes in exact evidence.
-        @mode == :catalog && (dictionary.name.to_s == DICTIONARY ||
+        !@full_snapshot && @mode == :catalog && (dictionary.name.to_s == DICTIONARY ||
           definition_context && dictionary.name.to_s == 'TempShadowInfo')
       end.map do |dictionary|
         [dictionary.name.to_s, dictionary.map { |key, value| [key.to_s, stable_value(value)] }.sort_by(&:first)]

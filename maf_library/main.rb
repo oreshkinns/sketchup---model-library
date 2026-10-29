@@ -14,6 +14,7 @@ require_relative 'placement_browser'
 require_relative 'model_recognition'
 require_relative 'catalog_sync'
 require_relative 'replacement'
+require_relative 'manual_duplicate_replacement'
 require_relative 'nested_merge'
 require_relative 'replacement_preview'
 require_relative 'project_actions'
@@ -297,6 +298,17 @@ module MafLibrary
       end
       @dialog.add_action_callback('replace_duplicates') do |_context, group_id, target_id|
         safely { replace_duplicates(group_id.to_s, target_id.to_s) }
+      end
+      @dialog.add_action_callback('preview_manual_replace_duplicates') do |_context, group_id, target_id, token|
+        begin
+          preview_manual_replace_duplicates(group_id.to_s, target_id.to_s, token.to_s)
+        rescue StandardError => error
+          @manual_duplicate_confirmation = nil
+          push(manual_replacement_preview: {token: token.to_s, group_id: group_id.to_s, target_id: target_id.to_s, error: error.message}, message: error.message, error: true)
+        end
+      end
+      @dialog.add_action_callback('manual_replace_duplicates') do |_context, group_id, target_id, token, confirmed|
+        safely { manual_replace_duplicates(group_id.to_s, target_id.to_s, token.to_s, confirmed) }
       end
       @dialog.add_action_callback('preview_nested_merge') do |_context, owner_id, token|
         begin
@@ -1084,6 +1096,37 @@ module MafLibrary
       end
       result = NestedMerge.new(model, report, owner_id).apply(confirmation[:fingerprint])
       invalidate_report("Объединено определений: #{result[:definitions]}, затронуто размещений: #{result[:placements]}. Используйте Undo для отмены.")
+    end
+
+    def preview_manual_replace_duplicates(group_id, target_id, token)
+      @manual_duplicate_confirmation = nil
+      report = fresh_report
+      group = duplicate_groups(report).find { |item| item['id'] == group_id }
+      raise 'Группа дублей больше не найдена. Запустите анализ повторно' unless group
+      validate_report_definitions(report, group['definitions'].map { |item| item['id'] })
+      operation = ManualDuplicateReplacement.new(model, report, group, target_id)
+      plan = operation.plan
+      require 'securerandom'
+      preview_token = SecureRandom.hex(24)
+      @manual_duplicate_confirmation = {report: report, group_id: group_id, target_id: target_id,
+        group_json: JSON.generate(group), token: preview_token, fingerprint: plan[:fingerprint]}
+      push(manual_replacement_preview: {token: token, group_id: group_id, target_id: target_id,
+        preview_token: preview_token, plan: plan[:payload]})
+    end
+
+    def manual_replace_duplicates(group_id, target_id, token, confirmed)
+      confirmation = @manual_duplicate_confirmation
+      @manual_duplicate_confirmation = nil
+      report = fresh_report
+      group = duplicate_groups(report).find { |item| item['id'] == group_id }
+      unless confirmed == true && confirmation && confirmation[:report].equal?(report) &&
+             confirmation[:group_id] == group_id && confirmation[:target_id] == target_id &&
+             confirmation[:token] == token && group && confirmation[:group_json] == JSON.generate(group)
+        raise 'Откройте предпросмотр ручной замены повторно и подтвердите замену'
+      end
+      validate_report_definitions(report, group['definitions'].map { |item| item['id'] })
+      result = ManualDuplicateReplacement.new(model, report, group, target_id).apply(confirmation[:fingerprint])
+      invalidate_report("Ручная замена во всей модели: #{result[:entities]} экземпляров, #{result[:placements]} размещений. Используйте Undo для отмены.")
     end
 
     def preview_replace_duplicates(group_id, target_id, token)
