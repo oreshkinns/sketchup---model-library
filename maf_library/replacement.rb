@@ -73,8 +73,8 @@ module MafLibrary
                    'Приклеенные компоненты требуют ручной замены'
                  elsif dynamic?(entity) && !@manual
                    'Экземпляры динамических компонентов требуют ручной проверки'
-                 elsif unsafe_transform?(entity)
-                   'Зеркальная или вырожденная трансформация требует ручной проверки'
+                 elsif (transform_reason = unsafe_transform_reason(entity))
+                   transform_reason
                  elsif Array(ref[:paths]).any? { |path| (path & Array(@model.active_path)).any? }
                    'Завершите редактирование вложенного компонента'
                  end
@@ -101,15 +101,23 @@ module MafLibrary
       entity.attribute_dictionaries.map { |dictionary| [dictionary.name, dictionary.to_a.sort_by { |pair| pair.first.to_s }] }.sort_by(&:first)
     end
 
-    def unsafe_transform?(entity)
-      return false unless entity.respond_to?(:transformation)
+    def unsafe_transform_reason(entity)
+      return nil unless entity.respond_to?(:transformation)
       transform = entity.transformation
-      return false unless transform.respond_to?(:xaxis) && transform.respond_to?(:yaxis) && transform.respond_to?(:zaxis)
+      matrix = transform.to_a if transform.respond_to?(:to_a)
+      if matrix && matrix.length == 16 && matrix.any? { |value| !value.to_f.finite? }
+        return 'Нечисловая или вырожденная трансформация не допускает замену'
+      end
+      return nil unless transform.respond_to?(:xaxis) && transform.respond_to?(:yaxis) && transform.respond_to?(:zaxis)
       x, y, z = transform.xaxis, transform.yaxis, transform.zaxis
       determinant = x.x.to_f * (y.y.to_f * z.z.to_f - y.z.to_f * z.y.to_f) -
                     x.y.to_f * (y.x.to_f * z.z.to_f - y.z.to_f * z.x.to_f) +
                     x.z.to_f * (y.x.to_f * z.y.to_f - y.y.to_f * z.x.to_f)
-      determinant <= 1e-9
+      if !determinant.finite? || determinant.abs <= 1e-9
+        'Нечисловая или вырожденная трансформация не допускает замену'
+      elsif determinant.negative? && !@manual
+        'Зеркальная трансформация требует явной ручной замены'
+      end
     end
 
     def do_replace(refs, target, sources, placements, manage_operation = true)

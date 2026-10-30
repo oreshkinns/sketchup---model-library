@@ -30,6 +30,20 @@ class BatchManualDuplicateReplacementTest < Minitest::Test
 
   def operation = MafLibrary::BatchManualDuplicateReplacement.new(@model, @report, @selections)
 
+  def test_batch_accepts_mirrored_source_and_preserves_full_matrix
+    vector = Struct.new(:x, :y, :z)
+    values = [-2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4, 0, 13, 17, 19, 1]
+    matrix = Struct.new(:xaxis, :yaxis, :zaxis, :to_a).new(
+      vector.new(-2, 0, 0), vector.new(0, 3, 0), vector.new(0, 0, 4), values)
+    @instances[1].define_singleton_method(:transformation) { matrix }
+    preview = operation.plan
+    result = operation.apply(preview[:fingerprint])
+    assert_equal 2, result[:entities]
+    assert_same @definitions[0], @instances[1].definition
+    assert_equal values, @instances[1].transformation.to_a
+    assert_equal [:start, :commit], @model.events
+  end
+
   def test_two_candidates_one_operation_and_global_counts_without_scan
     MafLibrary::Analyzer.stub(:new, ->(*) { raise 'Unexpected full scan' }) do
       preview = operation.plan

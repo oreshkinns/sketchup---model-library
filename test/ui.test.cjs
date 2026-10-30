@@ -46,8 +46,8 @@ test('manual candidate replacement requires bound preview and explicit acceptanc
   const preview=(request,extra={})=>({token:request[3],group_id:'candidate',target_id:request[2],preview_token:'server-bound',plan:{sources:['Original A'],target:'Reference B',entities:2,placements:5,paths:['Outside / A','Shared / A'],warnings:[{name:'Original A',reason:'Dynamic parameters become reference content'},'Glued reference preserved'],blockers:[]},...extra});
   await p.evaluate(payload=>MAF.receive({manual_replacement_preview:payload}),preview(requests[0]));await p.locator('#manual-accept').check();assert.equal(await p.locator('#confirm').isDisabled(),true);
   await p.evaluate(payload=>MAF.receive({manual_replacement_preview:payload}),preview(requests[1]));
-  assert.match(await p.locator('#modal-summary').innerText(),/Outside \/ A.*Shared \/ A/);assert.equal(await p.locator('#confirm').isDisabled(),false);
-  assert.match(await p.locator('#modal-summary').innerText(),/Dynamic parameters become reference content.*Glued reference preserved/);assert.match(await p.locator('#manual-accept-field').innerText(),/динамических параметров.*атрибуты размещений/);
+  await p.locator('#modal-summary > details > summary').click();await p.locator('#modal-summary li').first().waitFor();assert.match(await p.locator('#modal-summary').innerText(),/Outside \/ A.*Shared \/ A/s);assert.equal(await p.locator('#confirm').isDisabled(),false);
+  assert.match(await p.locator('#modal-summary').innerText(),/Dynamic parameters become reference content.*Glued reference preserved/s);assert.match(await p.locator('#manual-accept-field').innerText(),/динамических параметров.*атрибуты размещений/);
   assert.equal((await calls(p,'manual_replace_duplicates')).length,0);
   await p.locator('#confirm').click();assert.deepEqual((await calls(p,'manual_replace_duplicates')).at(-1),['manual_replace_duplicates','candidate','2','server-bound',true]);
 });
@@ -865,4 +865,19 @@ test('batch preview blocks unsafe plans, resets stale selections and rejects old
   await p.locator('#cancel').click();await p.locator('[data-batch-target]').selectOption('2');await p.locator('#batch-preview').click();
   await p.evaluate(payload=>MAF.receive({batch_manual_replacement_preview:{...payload,plan:{entities:1,blockers:[]}}}),response);assert.equal(await p.locator('#confirm').isDisabled(),true);
   await p.evaluate(()=>MAF.receive({report_stale:true}));assert.match(await p.locator('#batch-count').innerText(),/0/);assert.equal(await p.locator('#confirm').isDisabled(),true);assert.equal((await calls(p,'batch_manual_replace_duplicates')).length,0);
+});
+
+
+test('long batch blockers show grouped summaries and bounded paths while footer stays visible',async t=>{
+  const data=fixture();data.duplicates=[{id:'batch',label:'Batch',kind:'component',definitions:[{id:'1',name:'A'},{id:'2',name:'B'}]}];
+  const p=await open(t,data);await p.setViewportSize({width:800,height:600});await p.locator('.nav [data-page="duplicates"]').click();await p.locator('[data-batch-toggle]').click();await p.locator('#batch-preview').click();
+  const request=(await calls(p,'preview_batch_manual_replace_duplicates')).at(-1);
+  await p.evaluate(request=>MAF.receive({batch_manual_replacement_preview:{token:request[2],preview_token:'blocked',plan:{entities:300,placements:300,blockers:[],groups:[{group_id:'batch',plan:{target:'A',entities:300,blockers:Array.from({length:300},(_,i)=>({name:'Source',reason:'Locked source',paths:['Project / '+i+' / '+('long path '.repeat(20))]}))}}]}}}),request);
+  assert.match(await p.locator('#modal-summary').innerText(),/Блокировки: 300/);assert.match(await p.locator('#modal-summary').innerText(),/Source: Locked source · 300/);
+  assert.equal(await p.locator('#modal-summary li').count(),0);
+  await p.locator('#modal-summary details summary').click();await p.locator('#modal-summary li').first().waitFor();assert.equal(await p.locator('#modal-summary li').count(),20);
+  await p.locator('#modal-summary details button').click();assert.equal(await p.locator('#modal-summary li').count(),40);
+  await p.locator('#manual-accept').check();assert.equal(await p.locator('#confirm').isDisabled(),true);assert.match(await p.locator('#modal-status').innerText(),/Применение недоступно/);
+  const rect=await p.locator('#confirm').boundingBox();assert.ok(rect.y>=0&&rect.y+rect.height<=600);
+  assert.equal((await calls(p,'batch_manual_replace_duplicates')).length,0);
 });

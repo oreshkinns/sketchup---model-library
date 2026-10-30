@@ -21,6 +21,39 @@ class ManualDuplicateReplacementTest < Minitest::Test
     MafLibrary::ManualDuplicateReplacement.new(@model, @report, @group, target.object_id.to_s)
   end
 
+  def transform_matrix(sx, sy, sz, tx = 13)
+    values = [sx, 0, 0, 0, 0, sy, 0, 0, 0, 0, sz, 0, tx, 17, 19, 1]
+    vector = Struct.new(:x, :y, :z)
+    Struct.new(:xaxis, :yaxis, :zaxis, :to_a).new(
+      vector.new(sx, 0, 0), vector.new(0, sy, 0), vector.new(0, 0, sz), values)
+  end
+
+  def test_manual_preserves_mirrored_and_scaled_local_matrix_under_repeated_nested_paths
+    [[-1, 1, 1], [2, 2, 2], [-2, 3, 4]].each do |scales|
+      @instance.definition = @source
+      matrix = transform_matrix(*scales)
+      @instance.define_singleton_method(:transformation) { matrix }
+      plan = operation.plan
+      assert_empty plan[:payload]['blockers']
+      assert_equal 2, plan[:payload]['placements']
+      operation.apply(plan[:fingerprint])
+      assert_same @target, @instance.definition
+      assert_equal matrix.to_a, @instance.transformation.to_a
+    end
+  end
+
+  def test_manual_rejects_singular_near_zero_and_nonfinite_transforms
+    [transform_matrix(0, 1, 1), transform_matrix(-1e-10, 1, 1),
+     transform_matrix(Float::NAN, 1, 1), transform_matrix(Float::INFINITY, 1, 1),
+     transform_matrix(-1, 1, 1, Float::INFINITY)].each do |matrix|
+      @instance.define_singleton_method(:transformation) { matrix }
+      replacement = MafLibrary::Replacement.new(@model, @report, manual: true)
+      refute_empty replacement.preview([@source], @target)[:blocked]
+      assert_raises(MafLibrary::Replacement::Blocked) { replacement.replace([@source], @target) }
+      assert_same @source, @instance.definition
+    end
+  end
+
   def test_explicit_candidate_replacement_counts_global_paths_and_preserves_instance
     plan = operation.plan
     assert_equal 1, plan[:payload]['entities']

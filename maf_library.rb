@@ -3,7 +3,7 @@ require 'extensions.rb'
 
 module MafLibrary
   EXTENSION_NAME = 'МАФ Каталог'.freeze
-  VERSION = '0.12.0'.freeze
+  VERSION = '0.12.1'.freeze
   RELEASE_REPOSITORY = 'oreshkinns/sketchup---model-library'.freeze
 end
 
