@@ -14,10 +14,12 @@ module MafLibrary
     MATERIAL_TEXTURES = %i[texture ao_texture metallic_texture roughness_texture normal_texture].freeze
 
     # A reader belongs to one analysis pass; create a new reader after edits.
-    def initialize(mode: :duplicate, full_snapshot: false)
+    def initialize(mode: :duplicate, full_snapshot: false, portable_materials: false)
       raise ArgumentError, 'Unknown signature mode' unless [:duplicate, :catalog, :geometry].include?(mode)
       @mode = mode
       @full_snapshot = full_snapshot
+      @portable_materials = portable_materials
+      @portable_texture_cache = {}
       @signature_cache = {}
       @signature_complete = {}
       @signature_sampled = {}
@@ -390,7 +392,9 @@ module MafLibrary
       material = entity.public_send(method)
       return '' unless material
       texture = material.respond_to?(:texture) && material.texture
-      texture_data = if texture
+      texture_data = if @portable_materials
+                       portable_texture_token(texture)
+                     elsif texture
                        [texture.filename.to_s,
                         texture.respond_to?(:width) ? texture.width.to_f : nil,
                         texture.respond_to?(:height) ? texture.height.to_f : nil]
@@ -404,7 +408,42 @@ module MafLibrary
         values[property] = stable_value(material.public_send(property)) if material.respond_to?(property)
       end
       token << pbr unless pbr.empty?
+      if @portable_materials
+        maps = MATERIAL_TEXTURES.drop(1).each_with_object({}) do |property, values|
+          values[property] = portable_texture_token(material.public_send(property)) if material.respond_to?(property)
+        end
+        appearance = %i[colorize_type colorize_deltas use_alpha? materialType].each_with_object({}) do |property, values|
+          values[property] = stable_value(material.public_send(property)) if material.respond_to?(property)
+        end
+        token << maps << appearance
+      end
       token
+    end
+
+    # Portable memories hash embedded image bytes, never source-machine paths.
+    # Texture#image_rep and ImageRep#data are available since SketchUp 2018.
+    # Missing pixels must invalidate the complete fingerprint rather than fall
+    # back to a filename that could identify entirely different image content.
+    def portable_texture_token(texture)
+      return nil unless texture
+      return @portable_texture_cache[texture.object_id] if @portable_texture_cache.key?(texture.object_id)
+      image = texture.image_rep
+      bytes = image.data
+      width, height, bits, padding = image.width, image.height, image.bits_per_pixel, image.row_padding
+      raise 'Unreadable texture pixels' unless bytes.is_a?(String) && !bytes.empty? &&
+        [width, height, bits].all? { |value| value.is_a?(Integer) && value.positive? } &&
+        bits % 8 == 0 && padding.is_a?(Integer) && padding >= 0
+      row_bytes = width * (bits / 8)
+      stride = row_bytes + padding
+      raise 'Incomplete texture pixels' unless bytes.bytesize == stride * height
+      hash = Digest::SHA256.new
+      height.times { |row| hash.update(bytes.byteslice(row * stride, row_bytes)) }
+      physical = [texture.width.to_f, texture.height.to_f]
+      raise 'Invalid texture dimensions' unless physical.all? { |value| value.finite? && value.positive? }
+      @portable_texture_cache[texture.object_id] = ['pixels-v1', width, height, bits, hash.hexdigest, physical]
+    rescue StandardError
+      @uncertain = true
+      nil
     end
 
     # A filename and dimensions do not prove that two image files have the

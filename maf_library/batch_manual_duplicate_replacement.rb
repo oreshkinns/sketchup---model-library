@@ -33,6 +33,8 @@ module MafLibrary
       payload = {'manual' => true, 'scope' => 'global', 'groups' => plans.map { |item| {'group_id' => item[:group_id], 'target_id' => item[:target_id], 'plan' => item[:payload]} },
         'entities' => plans.sum { |item| item[:payload]['entities'] }, 'placements' => plans.sum { |item| item[:payload]['placements'] },
         'blockers' => plans.flat_map { |item| item[:payload]['blockers'] }, 'warning' => plans.first[:payload]['warning']}
+      payload['group_conversion'] = plans.any? { |item| item[:payload]['group_conversion'] }
+      payload['warning'] = plans.map { |item| item[:payload]['warning'] }.uniq.join(' ')
       {payload: payload, plans: plans, fingerprint: Digest::SHA256.hexdigest(JSON.generate([@selections, plans.map { |item| item[:fingerprint] }]))}
     end
 

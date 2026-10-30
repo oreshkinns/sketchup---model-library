@@ -1,14 +1,14 @@
 module MafLibrary
   module RecognitionRules
     PROFILES = [
-      ['Скамейки', ['скамья', 'скамейка', 'скамейки', 'лавка', 'bench'], [[600, 6000], [200, 2000], [250, 2000]]],
+      ['Скамейки', ['скамья', 'скамейка', 'скамейки', 'лавка', 'bench', 'benches'], [[600, 6000], [200, 2000], [250, 2000]]],
       ['Урны', ['урна', 'урны', 'мусорница', 'litter bin', 'trash bin'], [[150, 2000], [150, 2000], [250, 2500]]],
       ['Светильники', ['фонарь', 'светильник', 'светильники', 'lamp post', 'street light', 'bollard'], [[50, 5000], [50, 5000], [400, 20000]]],
-      ['Площадки', ['качели', 'горка', 'площадка', 'площадки', 'swing', 'slide', 'playground'], [[500, 30000], [300, 30000], [300, 15000]]]
+      ['Площадки', ['качели', 'горка', 'площадка', 'площадки', 'swing', 'swings', 'slide', 'slides', 'playground'], [[500, 30000], [300, 30000], [300, 15000]]]
     ].freeze
     EXCLUSIONS = %w[окно оконный дверь фасад витраж window door facade glazing].freeze
     TERM_PATTERNS = (PROFILES.flat_map { |profile| profile[1] } + EXCLUSIONS).uniq.each_with_object({}) do |term, patterns|
-      patterns[term] = /(?<![\p{L}\p{N}_])#{Regexp.escape(term)}(?![\p{L}\p{N}_])/i
+      patterns[term] = /(?<![\p{L}\p{N}])#{Regexp.escape(term)}(?![\p{L}\p{N}])/i
     end.freeze
 
     def self.evaluate(names:, category:, tags:, metadata:, flags:, complete:)
@@ -17,6 +17,10 @@ module MafLibrary
       if contains_term?(texts, EXCLUSIONS)
         return {'source' => 'other', 'category' => nil, 'reason' => 'architectural_exclusion'} if matches.empty?
         return candidate('architectural_exclusion')
+      end
+      # Role evidence never authorizes destructive geometry operations.
+      if matches.length == 1 && Array(names).any? { |name| !name.to_s.strip.empty? }
+        return {'source' => 'rule', 'category' => matches.first[0], 'reason' => 'outdoor_name'}
       end
       return candidate('incomplete_geometry') unless complete
       dimensions = metadata['bbox_mm']

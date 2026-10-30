@@ -1,3 +1,4 @@
+require_relative 'library_duplicate_decisions'
 require 'json'
 require 'fileutils'
 require 'uri'
@@ -117,6 +118,22 @@ module MafLibrary
       raise ArgumentError, 'Некорректный адрес облачного каталога'
     end
 
+    def library_duplicate_pairs
+      SCOPES.flat_map { |scope| LibraryDuplicateDecisions.new(path(scope)).keys }.uniq
+    end
+
+    def set_library_duplicate_pair(key, ignored, scope: 'personal')
+      check_scope(scope)
+      LibraryDuplicateDecisions.new(path(scope)).set(key, ignored)
+    end
+
+    def remove_library_duplicate_pair(key)
+      SCOPES.each do |scope|
+        store = LibraryDuplicateDecisions.new(path(scope))
+        store.set(key, false) if store.keys.include?(key)
+      end
+    end
+
     def ignored_duplicate_pairs
       Array(data['ignored_duplicate_pairs'])
     end
@@ -130,6 +147,7 @@ module MafLibrary
     end
 
     def reset_ignored_duplicate_pairs
+      library_duplicate_pairs.each { |key| remove_library_duplicate_pair(key) }
       current = data
       current['ignored_duplicate_pairs'] = []
       write(current)

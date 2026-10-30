@@ -862,8 +862,17 @@ module MafLibrary
       identities = ids.map { |id| DuplicateDecisions.identity(report.fetch('references').fetch(id.to_i), model) }
       raise 'Стабильная идентификация пары недоступна' unless identities.all?
       key = DuplicateDecisions.pair_key(identities)
-      @settings.set_ignored_duplicate_pair(key, ignored)
+      portable_key = DuplicateDecisions.library_pair_key(ids.map { |id| report.fetch('references').fetch(id.to_i) })
+      if portable_key
+        scope = JSON.parse(portable_key).all? { |identity| identity[0] == 'catalog-v1' && identity[1] == 'shared' } ? 'shared' : 'personal'
+        ignored ? @settings.set_library_duplicate_pair(portable_key, true, scope: scope) : @settings.remove_library_duplicate_pair(portable_key)
+        # Clear a legacy project decision as well when restoring a portable pair.
+        @settings.set_ignored_duplicate_pair(key, false) unless ignored
+      else
+        @settings.set_ignored_duplicate_pair(key, ignored)
+      end
       publish_duplicate_decisions(report)
+      push(message: portable_key ? 'Решение сохранено в папке библиотеки и переносится вместе с ней.' : 'Решение сохранено для этой пары определений в текущем проекте; одинаковые экземпляры нельзя безопасно различить в другом проекте.', duplicate_decision_scope: portable_key ? 'library' : 'project')
     end
 
     def publish_duplicate_decisions(report)

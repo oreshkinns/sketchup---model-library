@@ -221,29 +221,29 @@ class ModelRecognitionTest
     assert_equal 1, metadata['nesting_depth']
   end
 
-  def test_glued_and_dynamic_components_remain_candidates
+  def test_glued_and_dynamic_components_keep_role_and_safety_flags
     glued = geometry_definition('Скамья')
     placement = component(glued)
     placement.define_singleton_method(:glued_to) { Object.new }
     row = scan([placement])['models'].first
-    refute row['is_maf']
+    assert row['is_maf']
     assert row['metadata']['behavior_flags']['glued']
     dynamic = geometry_definition('Скамья')
     dictionary = Struct.new(:name).new('dynamic_attributes')
     dictionary.define_singleton_method(:map) { |&block| [].map(&block) }
     dynamic.define_singleton_method(:attribute_dictionaries) { [dictionary] }
     row = scan([component(dynamic)])['models'].first
-    refute row['is_maf']
+    assert row['is_maf']
     assert row['metadata']['behavior_flags']['dynamic']
-    assert_equal 'component_flags', row['recognition_reason']
+    assert_equal 'outdoor_name', row['recognition_reason']
   end
 
-  def test_unreadable_bounds_remain_candidates
+  def test_unreadable_bounds_do_not_erase_outdoor_role
     definition = geometry_definition('Скамья')
     definition.define_singleton_method(:bounds) { raise 'unreadable' }
     row = scan([component(definition)])['models'].first
-    refute row['is_maf']
-    assert_equal 'candidate', row['recognition_source']
+    assert row['is_maf']
+    assert_equal 'rule', row['recognition_source']
   end
 end
 
@@ -294,7 +294,7 @@ class ModelRecognitionTest
     assert row['metadata']['behavior_flags']['glued']
   end
 
-  def test_cutting_behavior_prevents_strict_local_profile_confirmation
+  def test_cutting_behavior_remains_independent_of_role
     definition = geometry_definition('Скамья')
     behavior = Object.new
     {always_face_camera?: false, cuts_opening?: true, is2d?: false, snapto: 0, no_scale_mask?: 0, shadows_face_sun?: false}.each do |method, value|
@@ -302,9 +302,9 @@ class ModelRecognitionTest
     end
     definition.define_singleton_method(:behavior) { behavior }
     row = scan([component(definition)])['models'].first
-    refute row['is_maf']
+    assert row['is_maf']
     assert row['metadata']['behavior_flags']['cuts_opening']
-    assert_equal 'component_flags', row['recognition_reason']
+    assert_equal 'outdoor_name', row['recognition_reason']
   end
 end
 

@@ -1,3 +1,4 @@
+require_relative 'library_duplicate_decisions'
 require 'digest'
 require 'json'
 require_relative 'definition_signature'
@@ -19,6 +20,27 @@ module MafLibrary
       end
     end
 
+    def self.library_identity(item, reader: nil)
+      definition = item[:definition]
+      return nil unless definition
+      signature = (reader || DefinitionSignature.new(mode: :catalog, full_snapshot: true, portable_materials: true)).call(definition)
+      return nil unless signature[:digest] && !signature[:sampled]
+      catalog = item[:catalog_id].to_s
+      scope = definition.get_attribute('MafLibrary', 'catalog_scope').to_s if definition.respond_to?(:get_attribute)
+      digest = signature[:digest]
+      hint = item[:geometry_signature] || DefinitionSignature.new(mode: :geometry).call(definition)[:digest]
+      return nil unless hint
+      if !catalog.empty? && %w[personal shared cloud].include?(scope)
+        ['catalog-v1', scope, catalog, digest, hint]
+      else
+        ['content-v1', 'content', digest, digest, hint]
+      end
+    end
+
+    def self.library_pair_key(items)
+      LibraryDuplicateDecisions.pair_key(*items.map { |item| library_identity(item) })
+    end
+
     def self.pair_key(identities)
       JSON.generate(identities.sort_by { |value| JSON.generate(value) })
     end
@@ -28,7 +50,8 @@ module MafLibrary
         'duplicates' => Array(report['duplicates']), 'nested_duplicates' => Array(report['nested_duplicates']),
         'other_duplicates' => Array(report['other_duplicates'])
       }
-      decisions = settings.ignored_duplicate_pairs.filter_map do |key|
+      library_keys = settings.respond_to?(:library_duplicate_pairs) ? settings.library_duplicate_pairs : []
+      decisions = (settings.ignored_duplicate_pairs + library_keys).filter_map do |key|
         parsed = JSON.parse(key) rescue nil
         parsed if parsed.is_a?(Array) && parsed.length == 2
       end
@@ -38,13 +61,36 @@ module MafLibrary
         update_summary(report)
         return report
       end
+      portable_reader = DefinitionSignature.new(mode: :catalog, full_snapshot: true, portable_materials: true) unless library_keys.empty?
+      portable_targets = library_keys.flat_map { |key| JSON.parse(key) }.uniq
+      # Only definitions that can participate in currently visible duplicate
+      # evidence need any identity. A content memory additionally narrows by
+      # the analyzer's already-computed geometry hint before reading pixels.
+      source_ids = report['_duplicate_decision_source'].values.flatten.each_with_object({}) do |group, ids|
+        Array(group['definitions']).each { |entry| ids[entry['id'].to_s] = true }
+      end
       identities = {}
       identity_ids = Hash.new { |hash, key| hash[key] = [] }
       report.fetch('references', {}).each do |id, item|
+        next unless source_ids[id.to_s]
         identity = identity(item, model)
         next unless identity
         identities[id.to_s] = identity
         identity_ids[JSON.generate(identity)] << id.to_s
+        unless library_keys.empty?
+          definition = item[:definition]
+          scope = definition.get_attribute('MafLibrary', 'catalog_scope').to_s if definition.respond_to?(:get_attribute)
+          catalog = item[:catalog_id].to_s
+          linked = !catalog.empty? && %w[personal shared cloud].include?(scope)
+          hint = item[:geometry_signature] || identity.last
+          relevant = portable_targets.any? do |target|
+            target[4] == hint && (linked ? target[0..2] == ['catalog-v1', scope, catalog] : target[0] == 'content-v1')
+          end
+          if relevant
+            portable = library_identity(item, reader: portable_reader)
+            identity_ids[JSON.generate(portable)] << id.to_s if portable
+          end
+        end
       end
       exclusions = decisions.flat_map do |left, right|
         identity_ids[JSON.generate(left)].product(identity_ids[JSON.generate(right)])

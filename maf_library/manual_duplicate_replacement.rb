@@ -14,7 +14,6 @@ module MafLibrary
       entries = @group.fetch('definitions')
       ids = entries.map { |entry| entry.fetch('id').to_s }
       raise ArgumentError, 'Выберите эталон из этой группы дублей' unless ids.include?(@target_id) && ids.uniq.length >= 2
-      raise Replacement::Blocked, 'Группы требуют отдельной ручной замены в SketchUp' if @group['kind'] == 'group'
       live = selected_inventory(ids)
       records = ids.map do |id|
         old = @report.fetch('references')[id.to_i]
@@ -27,12 +26,27 @@ module MafLibrary
       target = records[ids.index(@target_id)].fetch(:definition)
       sources = records.reject { |record| record[:definition] == target }.map { |record| record.fetch(:definition) }
       inspection = Replacement.new(@model, live, manual: true).preview(sources, target)
+      conversion = records.any? { |record| record[:refs].values.any? { |ref| ref[:entity].is_a?(Sketchup::Group) } }
+      if conversion
+        target_check = Replacement.new(@model, live, manual: true).preview([target], sources.first)
+        inspection[:blocked].concat(target_check[:blocked])
+        records.each do |record|
+          record[:refs].values.each do |ref|
+            entity = ref[:entity]
+            if entity.is_a?(Sketchup::Group) && !entity.respond_to?(:to_component)
+              inspection[:blocked] << {entity: entity, reason: 'SketchUp не поддерживает преобразование этой группы в компонент'}
+            end
+          end
+        end
+      end
       refs = sources.flat_map { |source| live['references'].fetch(source.object_id).fetch(:refs).values }
       if records.flat_map { |record| record[:refs].values }.any? { |ref| (Array(ref[:ancestors]) & ids.map(&:to_i)).any? }
         inspection[:blocked] << {entity: nil, reason: 'Исходные определения вложены друг в друга; замените их по отдельности'}
       end
       payload = ReplacementPreview.payload(inspection, refs).merge('manual' => true, 'scope' => 'global',
         'warning' => 'Во всей модели содержимое, материалы и параметры определения будут заменены эталоном. Динамические атрибуты экземпляров сохраняются; их соответствие эталону проверьте вручную. Приклеивание и трансформации проверяются после замены; при изменении операция отменяется.')
+      payload['group_conversion'] = conversion
+      payload['warning'] += ' Все выбранные группы, включая эталон, будут преобразованы в компоненты и объединены в одно определение. Преобразование входит в одну отменяемую операцию.' if conversion
       reader = DefinitionSignature.new(mode: :catalog, full_snapshot: true)
       signatures = records.map { |record| reader.call(record[:definition]) }
       if signatures.any? { |signature| signature[:digest].nil? }
@@ -130,6 +144,7 @@ module MafLibrary
         [entity.object_id, entity.definition.object_id, entity.valid?, entity.locked?, entity.name.to_s,
          entity.respond_to?(:transformation) ? entity.transformation.to_a : nil,
          ref[:locked], Array(ref[:ancestors]).sort, Array(ref[:paths]).map { |path| path.map(&:object_id) }.sort]
+          .push(Replacement.new(@model, {}, manual: true).send(:placement_state, entity))
       end.sort_by(&:first)]
     end
   end

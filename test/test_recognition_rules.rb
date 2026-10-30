@@ -10,6 +10,12 @@ class RecognitionRulesTest < Minitest::Test
     }.merge(overrides))
   end
 
+  def assert_role(**overrides)
+    result = evaluate(**overrides)
+    assert_equal 'rule', result.fetch('source')
+    assert_equal 'Скамейки', result.fetch('category')
+  end
+
   def assert_candidate(**overrides)
     result = evaluate(**overrides)
     assert_equal 'candidate', result.fetch('source')
@@ -35,7 +41,7 @@ class RecognitionRulesTest < Minitest::Test
         [[minimum, -1], [maximum, 1]].each do |bounds, delta|
           dimensions = bounds.dup
           dimensions[axis] += delta
-          assert_candidate(names: [name], metadata: {'bbox_mm' => dimensions, 'faces_count' => 1})
+          assert_equal category, evaluate(names: [name], metadata: {'bbox_mm' => dimensions, 'faces_count' => 1}).fetch('category')
         end
       end
     end
@@ -59,7 +65,7 @@ class RecognitionRulesTest < Minitest::Test
     assert_equal 'rule', evaluate(names: ['Object'], tags: ['park BENCH']).fetch('source')
     assert_candidate(names: ['benchwork'])
     assert_candidate(names: ['скамьями'])
-    assert_candidate(names: ['bench_123'])
+    assert_role(names: ['bench_123'])
   end
 
   def test_all_profile_terms
@@ -74,29 +80,29 @@ class RecognitionRulesTest < Minitest::Test
   end
 
   def test_incomplete_signature
-    assert_candidate(complete: false)
+    assert_role(complete: false)
   end
 
   def test_invalid_dimensions
     [[1800, 600], nil, [], [1800, 600, 800, 1], [0, 600, 800], [-1, 600, 800],
      [Float::NAN, 600, 800], [1800, Float::INFINITY, 800], ['1800', 600, 800]].each do |dimensions|
-      assert_candidate(metadata: {'bbox_mm' => dimensions, 'faces_count' => 24})
+      assert_role(metadata: {'bbox_mm' => dimensions, 'faces_count' => 24})
     end
   end
 
   def test_missing_or_zero_faces
     [nil, 0, -1].each do |faces|
-      assert_candidate(metadata: {'bbox_mm' => [1800, 600, 800], 'faces_count' => faces})
+      assert_role(metadata: {'bbox_mm' => [1800, 600, 800], 'faces_count' => faces})
     end
   end
 
   def test_blocking_flags_accept_string_and_symbol_keys
     %w[glued cuts_opening dynamic].each do |flag|
-      assert_candidate(flags: {flag => true})
-      assert_candidate(flags: {flag.to_sym => true})
+      assert_role(flags: {flag => true})
+      assert_role(flags: {flag.to_sym => true})
     end
-    assert_candidate(flags: {'axes_known' => false})
-    assert_candidate(flags: {axes_known: false})
+    assert_role(flags: {'axes_known' => false})
+    assert_role(flags: {axes_known: false})
   end
 
   def test_multiple_profiles_are_ambiguous

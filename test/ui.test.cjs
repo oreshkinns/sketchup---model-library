@@ -62,9 +62,9 @@ test('manual replacement resets acceptance, honors blockers and stale reports',a
   await p.evaluate(()=>MAF.receive({report_stale:true}));await respond();assert.equal(await p.locator('#confirm').isDisabled(),true);assert.equal((await calls(p,'manual_replace_duplicates')).length,0);
 });
 
-test('manual replacement blocks unsafe groups but permits explicit global scope conflicts',async t=>{
+test('manual replacement permits group and global scope previews for backend safety checks',async t=>{
   const data=fixture();data.duplicates=[{id:'group',label:'Group',kind:'group',definitions:[{id:'1',name:'A'},{id:'2',name:'B'}]},{id:'conflict',label:'Conflict',scope_conflict:true,definitions:[{id:'1',name:'A'},{id:'2',name:'B'}]}];
-  const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();assert.equal(await p.locator('[data-manual-duplicate="group"]').isDisabled(),true);assert.equal(await p.locator('[data-manual-duplicate="conflict"]').isDisabled(),false);
+  const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();assert.equal(await p.locator('[data-manual-duplicate="group"]').isDisabled(),false);assert.equal(await p.locator('[data-manual-duplicate="conflict"]').isDisabled(),false);
 });
 
 test('duplicates open on whole MAFs and nested matches are separated by parent',async t=>{
@@ -880,4 +880,25 @@ test('long batch blockers show grouped summaries and bounded paths while footer 
   await p.locator('#manual-accept').check();assert.equal(await p.locator('#confirm').isDisabled(),true);assert.match(await p.locator('#modal-status').innerText(),/Применение недоступно/);
   const rect=await p.locator('#confirm').boundingBox();assert.ok(rect.y>=0&&rect.y+rect.height<=600);
   assert.equal((await calls(p,'batch_manual_replace_duplicates')).length,0);
+});
+test('true groups enter manual and batch preview with explicit conversion warning',async t=>{
+  const data=fixture();data.duplicates=[{id:'true-group',label:'Groups',kind:'group',definitions:[{id:'1',name:'A',kind:'group'},{id:'2',name:'B',kind:'group'}]}];
+  const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();
+  assert.equal(await p.locator('[data-duplicate="true-group"]').isDisabled(),true);
+  await p.locator('[data-batch-toggle="true-group"]').click();await p.locator('#batch-preview').click();
+  const request=(await calls(p,'preview_batch_manual_replace_duplicates')).at(-1);
+  const warning='Все выбранные группы, включая эталон, будут преобразованы в компоненты';
+  await p.evaluate(({request,warning})=>MAF.receive({batch_manual_replacement_preview:{token:request[2],preview_token:'group-bound',plan:{entities:2,groups:[{group_id:'true-group',plan:{entities:2,warning,blockers:[]}}],blockers:[]}}}),{request,warning});
+  assert.match(await p.locator('#modal-summary').innerText(),/включая эталон/);
+  assert.equal(await p.locator('#confirm').isDisabled(),true);
+  await p.locator('#manual-accept').check();assert.equal(await p.locator('#confirm').isDisabled(),false);
+});
+
+test('large whole-group focus keeps complete IDs outside DOM attributes',async t=>{
+  const data=fixture();const definitions=Array.from({length:10000},(_,i)=>({id:String(i),name:'Definition '+i}));
+  data.duplicates=[{id:'huge',label:'Huge',kind:'component',definitions}];
+  const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();
+  const focus=p.locator('[data-focus-duplicate]');assert.ok((await focus.getAttribute('data-focus-duplicate')).length<10);
+  assert.equal(await p.locator('.duplicate-comparison tbody tr').count(),20);await focus.click();
+  assert.deepEqual((await calls(p,'focus_duplicates')).at(-1)[1],definitions.map(d=>d.id));
 });
