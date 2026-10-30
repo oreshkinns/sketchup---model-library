@@ -841,3 +841,28 @@ test('other project duplicates are visible without confirming recognition',async
   assert.doesNotMatch(await p.locator('#duplicate-scope-info').textContent(),/можно подтвердить/);
   assert.equal((await calls(p,'set_maf_decision')).length,0);
 });
+
+test('batch manual replacement retains reference choices across pages and scopes and requires preview consent',async t=>{
+  const data=fixture();const group=i=>({id:'batch-'+i,label:'Batch '+i,kind:'component',definitions:[{id:i+'a',name:'Source '+i},{id:i+'b',name:'Reference '+i}]});data.duplicates=Array.from({length:11},(_,i)=>group(i));data.other_duplicates=[group(20)];
+  const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();
+  await p.locator('[data-batch-target="batch-0"]').selectOption('0b');await p.locator('[data-batch-toggle="batch-0"]').click();
+  await p.locator('[data-page-next="duplicates"]').click();await p.locator('[data-batch-toggle="batch-10"]').click();
+  await p.locator('[data-duplicate-scope="other"]').click();assert.match(await p.locator('#batch-count').innerText(),/2/);
+  await p.locator('[data-duplicate-scope="whole"]').click();assert.equal(await p.locator('[data-batch-target="batch-0"]').inputValue(),'0b');
+  await p.locator('#batch-preview').click();assert.equal(await p.locator('#confirm').isDisabled(),true);await p.locator('#manual-accept').check();assert.equal(await p.locator('#confirm').isDisabled(),true);
+  const request=(await calls(p,'preview_batch_manual_replace_duplicates')).at(-1);assert.deepEqual(JSON.parse(request[1]),[{group_id:'batch-0',target_id:'0b'},{group_id:'batch-10',target_id:'10a'}]);
+  await p.evaluate(request=>MAF.receive({batch_manual_replacement_preview:{token:request[2],preview_token:'batch-bound',plan:{entities:4,placements:8,blockers:[],groups:JSON.parse(request[1]).map(g=>({...g,plan:{sources:['Source'],target:g.target_id,entities:2,placements:4}}))}}}),request);
+  assert.equal(await p.locator('#confirm').isDisabled(),false);assert.match(await p.locator('#modal-summary').innerText(),/0b.*\n.*10a/);
+  await p.locator('#confirm').click();assert.deepEqual((await calls(p,'batch_manual_replace_duplicates')).at(-1),['batch_manual_replace_duplicates',request[1],'batch-bound',true]);
+});
+
+test('batch preview blocks unsafe plans, resets stale selections and rejects old preview responses',async t=>{
+  const data=fixture();data.duplicates=[{id:'batch',label:'Batch',kind:'component',definitions:[{id:'1',name:'A'},{id:'2',name:'B'}]}];
+  const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();await p.locator('[data-batch-toggle]').click();await p.locator('#batch-preview').click();
+  const request=(await calls(p,'preview_batch_manual_replace_duplicates')).at(-1);
+  const response={token:request[2],preview_token:'unsafe',plan:{entities:1,placements:3,groups:[],blockers:[{reason:'Locked source'}]}};
+  await p.evaluate(payload=>MAF.receive({batch_manual_replacement_preview:payload}),response);await p.locator('#manual-accept').check();assert.equal(await p.locator('#confirm').isDisabled(),true);assert.match(await p.locator('#modal-summary').innerText(),/Locked source/);
+  await p.locator('#cancel').click();await p.locator('[data-batch-target]').selectOption('2');await p.locator('#batch-preview').click();
+  await p.evaluate(payload=>MAF.receive({batch_manual_replacement_preview:{...payload,plan:{entities:1,blockers:[]}}}),response);assert.equal(await p.locator('#confirm').isDisabled(),true);
+  await p.evaluate(()=>MAF.receive({report_stale:true}));assert.match(await p.locator('#batch-count').innerText(),/0/);assert.equal(await p.locator('#confirm').isDisabled(),true);assert.equal((await calls(p,'batch_manual_replace_duplicates')).length,0);
+});

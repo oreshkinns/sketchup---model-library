@@ -15,6 +15,7 @@ require_relative 'model_recognition'
 require_relative 'catalog_sync'
 require_relative 'replacement'
 require_relative 'manual_duplicate_replacement'
+require_relative 'batch_manual_duplicate_replacement'
 require_relative 'nested_merge'
 require_relative 'replacement_preview'
 require_relative 'project_actions'
@@ -306,6 +307,17 @@ module MafLibrary
           @manual_duplicate_confirmation = nil
           push(manual_replacement_preview: {token: token.to_s, group_id: group_id.to_s, target_id: target_id.to_s, error: error.message}, message: error.message, error: true)
         end
+      end
+      @dialog.add_action_callback('preview_batch_manual_replace_duplicates') do |_context, selections, token|
+        begin
+          preview_batch_manual_replace_duplicates(selections, token.to_s)
+        rescue StandardError => error
+          @batch_manual_duplicate_confirmation = nil
+          push(batch_manual_replacement_preview: {token: token.to_s, error: error.message}, message: error.message, error: true)
+        end
+      end
+      @dialog.add_action_callback('batch_manual_replace_duplicates') do |_context, selections, token, confirmed|
+        safely { batch_manual_replace_duplicates(selections, token.to_s, confirmed) }
       end
       @dialog.add_action_callback('manual_replace_duplicates') do |_context, group_id, target_id, token, confirmed|
         safely { manual_replace_duplicates(group_id.to_s, target_id.to_s, token.to_s, confirmed) }
@@ -1096,6 +1108,31 @@ module MafLibrary
       end
       result = NestedMerge.new(model, report, owner_id).apply(confirmation[:fingerprint])
       invalidate_report("Объединено определений: #{result[:definitions]}, затронуто размещений: #{result[:placements]}. Используйте Undo для отмены.")
+    end
+
+    def preview_batch_manual_replace_duplicates(selections_json, token)
+      @batch_manual_duplicate_confirmation = nil
+      selections = JSON.parse(selections_json.to_s)
+      report = fresh_report
+      plan = BatchManualDuplicateReplacement.new(model, report, selections).plan
+      require 'securerandom'
+      preview_token = SecureRandom.hex(24)
+      @batch_manual_duplicate_confirmation = {report: report, selections: JSON.generate(selections),
+        token: preview_token, fingerprint: plan[:fingerprint]}
+      push(batch_manual_replacement_preview: {token: token, preview_token: preview_token, plan: plan[:payload]})
+    end
+
+    def batch_manual_replace_duplicates(selections_json, token, confirmed)
+      confirmation = @batch_manual_duplicate_confirmation
+      @batch_manual_duplicate_confirmation = nil
+      selections = JSON.parse(selections_json.to_s)
+      report = fresh_report
+      unless confirmed == true && confirmation && confirmation[:report].equal?(report) &&
+             confirmation[:token] == token && confirmation[:selections] == JSON.generate(selections)
+        raise 'Откройте предпросмотр ручной замены повторно и подтвердите замену'
+      end
+      result = BatchManualDuplicateReplacement.new(model, report, selections).apply(confirmation[:fingerprint])
+      invalidate_report("Ручная замена групп: #{result[:groups]}, экземпляров: #{result[:entities]}, размещений: #{result[:placements]}. Используйте Undo для отмены.")
     end
 
     def preview_manual_replace_duplicates(group_id, target_id, token)
