@@ -34,6 +34,25 @@ return page;
 async function calls(page,name){return page.evaluate(name=>window.calls.filter(x=>x[0]===name),name);
 }
 
+test('replacement result stays visible through automatic refresh and controls recover',async t=>{
+  const data=fixture();data.duplicates=[{id:'remaining',label:'Remaining pair',kind:'component',replaceable:false,definitions:[{id:'1',name:'A'},{id:'2',name:'B'}]}];
+  const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();
+  await p.evaluate(()=>MAF.receive({replacement_result:{message:'Заменено экземпляров: 1. Эталон: Скамья.'},report_stale:true,scan_state:'running'}));
+  assert.equal(await p.locator('#replacement-result').isVisible(),true);
+  assert.match(await p.locator('#replacement-result').innerText(),/Заменено экземпляров: 1.*Скамья.*Ctrl\+Z/s);
+  assert.match(await p.locator('#replacement-refresh').innerText(),/Обновляем/);
+  assert.equal(await p.locator('[data-manual-duplicate]').isDisabled(),true);
+  await p.evaluate(()=>MAF.receive({scan_state:'idle',report_stale:true,message:'Анализ остановлен.'}));
+  assert.match(await p.locator('#replacement-refresh').innerText(),/Нажмите «Анализировать»/);
+  assert.equal(await p.locator('#replacement-result').isVisible(),true);
+  await p.evaluate(data=>MAF.receive({data,report_stale:false,scan_state:'idle',message:'Анализ завершен.'}),data);
+  assert.equal(await p.locator('[data-manual-duplicate]').isDisabled(),false);
+  assert.equal(await p.locator('#replacement-result').isVisible(),true);
+  assert.match(await p.locator('#replacement-refresh').innerText(),/обновлён/);
+  await p.evaluate(()=>MAF.receive({replacement_result:null,report_stale:true}));
+  assert.equal(await p.locator('#replacement-result').isVisible(),false);
+});
+
 test('manual candidate replacement requires bound preview and explicit acceptance',async t=>{
   const data=fixture();data.duplicates=[];data.other_duplicates=[{id:'candidate',label:'Screenshot component',kind:'component',classification:'candidate',confidence:'2 сходных определения',replaceable:false,definitions:[{id:'1',name:'Original A',instances:2},{id:'2',name:'Reference B',instances:3}]}];
   const p=await open(t,data);await p.locator('.nav [data-page="duplicates"]').click();await p.locator('[data-duplicate-scope="other"]').click();

@@ -193,6 +193,10 @@ module MafLibrary
       else
         mark_report_stale
       end
+      if @replacement_result
+        @replacement_result = nil
+        push(replacement_result: nil)
+      end
     rescue StandardError => error
       warn("МАФ Каталог: observer: #{error.message}")
     end
@@ -667,6 +671,16 @@ module MafLibrary
       catalog_changed ? refresh_catalog(message) : push(message: message)
     end
 
+    def refresh_after_duplicate_replacement(message)
+      invalidate_report(message)
+      @replacement_result = message
+      push(replacement_result: {message: message})
+      # Reconcile without model writes: Ctrl+Z must undo the replacement itself,
+      # rather than a catalog-link operation created by the automatic scan.
+      @read_only_reconciliation = true
+      start_scan
+    end
+
     def cancel_timers
       [@refresh_timer_id, @selection_timer_id, @scan_timer_id].compact.each { |id| UI.stop_timer(id) }
       @refresh_timer_id = @selection_timer_id = @scan_timer_id = nil
@@ -1116,7 +1130,7 @@ module MafLibrary
         raise 'Откройте предпросмотр объединения повторно'
       end
       result = NestedMerge.new(model, report, owner_id).apply(confirmation[:fingerprint])
-      invalidate_report("Объединено определений: #{result[:definitions]}, затронуто размещений: #{result[:placements]}. Используйте Undo для отмены.")
+      refresh_after_duplicate_replacement("Объединено определений: #{result[:definitions]}, затронуто размещений: #{result[:placements]}. Используйте Undo для отмены.")
     end
 
     def preview_batch_manual_replace_duplicates(selections_json, token)
@@ -1141,7 +1155,7 @@ module MafLibrary
         raise 'Откройте предпросмотр ручной замены повторно и подтвердите замену'
       end
       result = BatchManualDuplicateReplacement.new(model, report, selections).apply(confirmation[:fingerprint])
-      invalidate_report("Ручная замена групп: #{result[:groups]}, экземпляров: #{result[:entities]}, размещений: #{result[:placements]}. Используйте Undo для отмены.")
+      refresh_after_duplicate_replacement("Замена выполнена. Групп: #{result[:groups]}, экземпляров: #{result[:entities]}, размещений: #{result[:placements]}.")
     end
 
     def preview_manual_replace_duplicates(group_id, target_id, token)
@@ -1172,7 +1186,8 @@ module MafLibrary
       end
       validate_report_definitions(report, group['definitions'].map { |item| item['id'] })
       result = ManualDuplicateReplacement.new(model, report, group, target_id).apply(confirmation[:fingerprint])
-      invalidate_report("Ручная замена во всей модели: #{result[:entities]} экземпляров, #{result[:placements]} размещений. Используйте Undo для отмены.")
+      target_name = group['definitions'].find { |item| item['id'] == target_id }.fetch('name', target_id)
+      refresh_after_duplicate_replacement("Замена выполнена. Эталон: #{target_name}. Заменено экземпляров: #{result[:entities]}, затронуто размещений: #{result[:placements]}.")
     end
 
     def preview_replace_duplicates(group_id, target_id, token)
@@ -1508,7 +1523,7 @@ module MafLibrary
       preview = replacement.preview(sources, target)
       raise MafLibrary::Replacement::Blocked, preview[:blocked].map { |item| item[:reason] }.uniq.join('; ') unless preview[:blocked].empty?
       result = replacement.replace(sources, target)
-      invalidate_report("Затронуто размещений: #{result[:placements]}. Используйте Undo для отмены.")
+      refresh_after_duplicate_replacement("Замена выполнена. Эталон: #{target_info['name']}. Затронуто размещений: #{result[:placements]}.")
     end
 
     def replace_selected

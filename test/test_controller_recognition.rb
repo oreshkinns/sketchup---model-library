@@ -105,6 +105,47 @@ class NativeControllerEntities
 end
 
 class ControllerRecognitionTest < Minitest::Test
+  def test_manual_duplicate_replacement_refreshes_report_without_another_model_operation
+    exercise_replacement_refresh(batch: false)
+  end
+
+  def test_batch_duplicate_replacement_refreshes_report_without_another_model_operation
+    exercise_replacement_refresh(batch: true)
+  end
+
+  def exercise_replacement_refresh(batch:)
+    copy = FakeDefinition.new('Bench copy', [FakeEdge.new])
+    placed = Sketchup::ComponentInstance.new(copy)
+    @model.entities << placed
+    ready
+    group = @controller.send(:duplicate_groups, report).find do |item|
+      item['definitions'].map { |d| d['id'] }.sort == [copy.object_id.to_s, @definition.object_id.to_s].sort
+    end
+    refute_nil group
+    target = @definition.object_id.to_s
+    if batch
+      selections = JSON.generate([{group_id: group['id'], target_id: target}])
+      @controller.send(:preview_batch_manual_replace_duplicates, selections, 'request')
+      token = @dialog.payloads.last.dig('batch_manual_replacement_preview', 'preview_token')
+      @controller.send(:batch_manual_replace_duplicates, selections, token, true)
+    else
+      @controller.send(:preview_manual_replace_duplicates, group['id'], target, 'request')
+      token = @dialog.payloads.last.dig('manual_replacement_preview', 'preview_token')
+      @controller.send(:manual_replace_duplicates, group['id'], target, token, true)
+    end
+    assert_same @definition, placed.definition
+    operations = @model.operations.length
+    assert_equal 'running', scan_state, 'successful replacement must start report refresh'
+    result = @dialog.payloads.reverse_each.find { |payload| payload['replacement_result'] }
+    refute_nil result, 'replacement outcome must be visible independently of the analysis status'
+    assert_match(/1/, result['replacement_result']['message'])
+    drain_scan_timers
+    refute @controller.instance_variable_get(:@report_stale)
+    assert_equal 'idle', scan_state
+    assert_equal operations, @model.operations.length, 'refresh must preserve replacement as the last Undo step'
+    refute @controller.send(:duplicate_groups, report).any? { |item| item['definitions'].any? { |d| d['id'] == copy.object_id.to_s } }
+  end
+
   def test_changing_library_path_during_card_build_cancels_scan_without_old_cards_or_restart
     @definition.set_attribute('MafLibrary', 'maf_decision', 'confirmed')
     ready
