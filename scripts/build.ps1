@@ -1,6 +1,11 @@
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $projectRoot = Split-Path $PSScriptRoot -Parent
+Push-Location $projectRoot
+try {
+    npm run build
+    if ($LASTEXITCODE -ne 0) { throw 'React UI build failed' }
+} finally { Pop-Location }
 $source = Get-Content -LiteralPath (Join-Path $projectRoot 'maf_library.rb') -Raw
 $version = [regex]::Match($source, 'VERSION = ''([^'']+)''').Groups[1].Value
 if (-not $version) { throw 'Extension version not found' }

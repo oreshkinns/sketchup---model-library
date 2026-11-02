@@ -185,6 +185,11 @@ test('duplicate comparison requests previews for the correct definitions and rep
   await p.evaluate(token=>MAF.receive({duplicate_previews:{group_id:'compare',ids:['1','3'],token,images:{'1':'data:image/png;base64,aGVsbG8='}}}),request[3]);
   assert.equal(await p.locator('.duplicate-comparison img').count(),1);
   assert.match(await p.locator('.duplicate-comparison').textContent(),/Нет превью/);
+  for(let repeat=0;repeat<2;repeat++){
+    await p.evaluate(()=>MAF.receive({catalog_update:{}}));
+    assert.equal(await p.locator('.duplicate-comparison img').count(),1,'React rerenders retain loaded previews');
+    await p.evaluate(token=>MAF.receive({duplicate_previews:{group_id:'compare',ids:['1','3'],token,images:{'1':'data:image/png;base64,aGVsbG8='}}}),request[3]);
+  }
   await p.evaluate(()=>MAF.receive({report_stale:true}));
   assert.equal(await p.locator('.duplicate-comparison img').count(),0);
   assert.equal(await p.locator('[data-load-previews="compare"]').isDisabled(),true);
@@ -508,23 +513,28 @@ const result=await p.evaluate(()=>{
 });
 assert.deepEqual(result,{model:true,duplicate:true,catalog:true,stale:true,counts:['В текущем проекте: —','В текущем проекте: —']});
 });
-test('stale marker and full data together render the catalog once',async t=>{
+test('stale marker and identical full data preserve existing React catalog cards',async t=>{
 const p=await open(t);
 const mutations=await p.evaluate(data=>{
+  const card=document.querySelector('[data-card-key="personal:same"]');
   const observer=new MutationObserver(()=>{});
   observer.observe(document.querySelector('#catalog-list'),{childList:true});
   MAF.receive({report_stale:false,data});
   const count=observer.takeRecords().length;
   observer.disconnect();
-  return count;
+  return {count,preserved:card===document.querySelector('[data-card-key="personal:same"]')};
 },fixture());
-assert.equal(mutations,1);
+assert.deepEqual(mutations,{count:0,preserved:true});
 assert.equal(await p.locator('[data-card-key="personal:same"] [data-placement-count]').textContent(),'В текущем проекте: 5 размещений');
 });
 test('candidate parameters, reasons and warnings are separate, decisions preview global scope',async t=>{
 const p=await open(t);
 await p.locator('.nav [data-page="overview"]').click();
 const candidate=p.locator('[data-candidate="definition:3"]');
+await p.evaluate(()=>MAF.receive({report_stale:true}));
+assert.equal(await candidate.locator('[data-select-recognition]').isDisabled(),true);
+await p.evaluate(data=>MAF.receive({data,report_stale:false}),fixture());
+assert.equal(await candidate.locator('[data-select-recognition]').isDisabled(),false,'fresh React report restores recognition actions');
 assert.match(await candidate.textContent(),/1800 × 500 × 900/);
 assert.match(await candidate.textContent(),/12 граней.*24 рёбер.*2 материалов/s);
 assert.match(await candidate.textContent(),/Вложенность: 3/);
@@ -657,6 +667,11 @@ await p.locator('#selected-menu').click();
 await p.locator('[data-action="rename"]').click();
 await p.locator('#modal-select').selectOption('all_names');
 assert.match(await p.locator('#action-scope').textContent(),/5.*Двор \/ 2.*Парк \/ 2/s);
+await p.locator('#cancel').click();
+await p.locator('#selected-menu').click();
+await p.locator('[data-action="rename"]').click();
+assert.equal(await p.locator('#modal-select').inputValue(),'selected','a new confirmation resets the previous global rename mode');
+assert.doesNotMatch(await p.locator('#action-scope').textContent(),/Двор \/ 2/,'preview and submitted rename scope must agree');
 });
 
 for (const [action, callback] of [

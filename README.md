@@ -4,11 +4,17 @@
 
 ## Установка
 
-1. Скачайте [maf_library-0.13.1.rbz](dist/maf_library-0.13.1.rbz).
+1. Скачайте [maf_library-0.14.0.rbz](dist/maf_library-0.14.0.rbz).
 2. В SketchUp откройте **Extensions → Extension Manager → Install Extension** и выберите файл `.rbz`.
 3. Откройте **МАФ Каталог** кнопкой на панели инструментов SketchUp. Панель инструментов можно перетащить и закрепить в удобном месте; пункт **Extensions → МАФ Каталог** также доступен.
 
 Архив пока не подписан для Extension Warehouse. Для локального тестирования SketchUp может запросить разрешение на загрузку неподписанного расширения.
+
+## Обновление 0.14.0 — React
+
+Представления интерфейса перенесены на React 18 без изменения дизайна и Ruby-алгоритмов. React и стили включены в архив расширения: интернет и Node.js при использовании плагина не нужны. Исходники интерфейса находятся в `frontend/`; `preview.html` генерируется командой `npm run build`. Оба скрипта упаковки автоматически пересобирают интерфейс перед созданием RBZ.
+
+Установка окружения разработки: `npm ci`, затем `npm run build` и `npm test`. Собранный `preview.html` можно открыть как локальный файл. Для последующей замены компонентов см. [структуру React-интерфейса](docs/react-interface.md).
 
 ## Исправление 0.13.1
 
@@ -249,11 +255,12 @@ API: [SketchUp Ruby API](https://ruby.sketchup.com/), [GitHub Releases API](http
 ### Автоматическая проверка интерфейса
 
 ```sh
-npm install
+npm ci
 npx playwright install chromium
+npm run build
 npm test
 ruby -e "Dir['test/test_*.rb'].sort.each { |file| require File.expand_path(file) }"
 bash build.sh
 ```
 
-UI-тесты используют `node:test` и Playwright 1.62.1. Для готового окружения можно задать `NODE_PATH` на каталог с установленным Playwright; `MAF_UI_FILE` позволяет тем же тестам открыть извлечённый `maf_library/ui.html` из RBZ. Сборка требует Ruby, Bash и `zip`. Браузерные и Ruby-тесты вне SketchUp не подтверждают работу HtmlDialog, нативного диалога, сохранения `.skp` и Undo — выполните [ручную приёмку](docs/sketchup-acceptance.md).
+UI-тесты используют `node:test` и Playwright 1.62.1. Для готового окружения можно задать `NODE_PATH` на каталог с установленным Playwright; `MAF_UI_FILE` позволяет тем же тестам открыть извлечённый `maf_library/ui.html` из RBZ. Для сборки интерфейса нужны Node.js и npm. Упаковка через `build.sh` также требует Ruby, Bash и `zip`; на Windows можно использовать `scripts/build.ps1`. Браузерные и Ruby-тесты вне SketchUp не подтверждают работу HtmlDialog, нативного диалога, сохранения `.skp` и Undo — выполните [ручную приёмку](docs/sketchup-acceptance.md).
