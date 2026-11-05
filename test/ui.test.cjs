@@ -268,7 +268,7 @@ test('large reports render only the active page with bounded reachable batches',
   assert.ok(await p.locator('.catalog-card').count()<=100);
   for(let i=0;i<3;i++)await p.locator('[data-page-next="catalog"]').click();
   await p.locator('[data-place="card-349"]').click();
-  assert.deepEqual((await calls(p,'place_model')).at(-1),['place_model','card-349']);
+  assert.deepEqual((await calls(p,'place_model')).at(-1),['place_model','personal:card-349']);
   await p.evaluate(()=>MAF.receive({report_stale:true}));
   await p.locator('.nav [data-page="overview"]').click();
   assert.ok(await p.locator('#models-body tr').count()<=100);
@@ -589,7 +589,30 @@ assert.match(await p.locator('#modal-description').textContent(),/новую в�
 await p.locator('#confirm').click();
 assert.deepEqual((await calls(p,'update_catalog_version')).at(-1),['update_catalog_version','same','1','personal']);
 await p.locator('[data-card-key="personal:same"] [data-place]').click();
-assert.deepEqual((await calls(p,'place_model')).at(-1),['place_model','same']);
+assert.deepEqual((await calls(p,'place_model')).at(-1),['place_model','personal:same']);
+});
+test('shared actions retain the selected scope when a personal card has the same ID',async t=>{
+  const p=await open(t);
+  const shared=p.locator('[data-card-key="shared:same"]');
+  await shared.locator('[data-favorite]').click();
+  assert.deepEqual((await calls(p,'update_catalog_details')).at(-1),['update_catalog_details','shared:same',[],true]);
+  assert.equal(await p.locator('[data-card-key="personal:same"] [data-favorite]').innerText(),'☆');
+  await shared.locator('[data-place]').click();
+  assert.deepEqual((await calls(p,'place_model')).at(-1),['place_model','shared:same']);
+  await shared.locator(':scope > details > summary').click();
+  await shared.locator('[data-thumb-auto]').click();
+  assert.deepEqual((await calls(p,'regenerate_thumbnail')).at(-1),['regenerate_thumbnail','shared:same']);
+  p.on('dialog',dialog=>dialog.accept(dialog.defaultValue()));
+  for (const mode of ['line','surface']) {
+    await shared.locator('[data-mode="'+mode+'"]').click();
+    assert.deepEqual((await calls(p,'start_array')).at(-1).slice(0,4),['start_array','shared:same',mode,1000]);
+  }
+  await p.locator('.nav [data-page="overview"]').click();
+  await p.locator('[data-node="yard/1"]').click();
+  await p.locator('#project-tools summary').click();
+  await p.locator('#replace-selected').click();
+  await p.locator('#modal-select').selectOption('catalog:shared:same');
+  assert.equal((await calls(p,'preview_replace_rows')).at(-1)[2],'catalog:shared:same');
 });
 test('demo has hierarchy, candidate, confirmed MAF and counts without a bridge',async t=>{
 const p=await open(t,null,true);

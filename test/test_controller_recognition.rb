@@ -715,6 +715,138 @@ class ControllerRecognitionTest < Minitest::Test
     assert_equal before, @definition.instance_variable_get(:@attrs)
   end
 
+  def load_imported_definition_for_reuse(edge_count: 1)
+    serialized_selection
+    @definition.entities = Array.new(edge_count) { FakeEdge.new }
+    source = File.join(@dir, 'import.skp')
+    @definition.save_copy(source)
+    saved = @catalogs.catalog('personal').import(source, name: 'Imported bench', category: 'Seats')
+    entry = @catalogs.find(saved['id'])
+    refute entry.key?('recognition_fingerprint')
+    loaded = load_in_fresh_model(entry)
+    @model.definitions.reused_definition = loaded
+    [entry, loaded]
+  end
+
+  def test_reused_import_rejects_project_geometry_edits_without_catalog_fingerprint
+    entry, loaded = load_imported_definition_for_reuse
+    loaded.entities.first.end.position.x = 99
+    assert_raises(ArgumentError) { @controller.send(:load_catalog_definition, entry) }
+  end
+
+  def test_reused_import_accepts_unchanged_geometry_without_catalog_fingerprint
+    entry, loaded = load_imported_definition_for_reuse
+    assert_same loaded, @controller.send(:load_catalog_definition, entry)
+  end
+
+  def test_reused_empty_import_loads_original_without_changing_live_definition
+    entry, loaded = load_imported_definition_for_reuse
+    loaded.entities.clear
+    attributes = loaded.instance_variable_get(:@attrs).dup
+    definitions = @model.definitions
+    catalog_path = @catalogs.catalog('personal').file_for(entry['id'])
+    definitions.define_singleton_method(:load) do |path|
+      if path == catalog_path
+        loaded
+      else
+        definition = SerializedControllerDefinition.load(path)
+        self << definition
+        definition
+      end
+    end
+    fresh = @controller.send(:load_catalog_definition, entry)
+    refute_same loaded, fresh
+    assert_equal 1, fresh.entities.length
+    assert_equal 0, loaded.entities.length
+    assert_equal attributes, loaded.instance_variable_get(:@attrs)
+    assert_loaded_metadata(entry, fresh)
+  end
+
+  def test_reused_textured_import_loads_fresh_verified_bytes_without_changing_live_definition
+    serialized_selection
+    source = File.join(@dir, 'textured.skp')
+    @definition.save_copy(source)
+    saved = @catalogs.catalog('personal').import(source, name: 'Textured', category: 'Seats')
+    entry = @catalogs.find(saved['id'])
+    fresh_model_for_catalog_load
+    definitions = @model.definitions
+    original = definitions.method(:load)
+    catalog_path = @catalogs.catalog('personal').file_for(entry['id'])
+    texture = Struct.new(:filename, :width, :height).new('wood.png', 10, 10)
+    material = Struct.new(:name, :texture, :color, :alpha).new('Wood', texture, Struct.new(:to_a).new([1, 2, 3]), 1)
+    staged_paths = []
+    definitions.define_singleton_method(:load) do |path|
+      if path == catalog_path && !empty?
+        first
+      else
+        staged_paths << path if path != catalog_path
+        definition = original.call(path)
+        definition.entities.first.define_singleton_method(:material) { material }
+        definition
+      end
+    end
+    loaded = @controller.send(:load_catalog_definition, entry)
+    unchanged = @controller.send(:load_catalog_definition, entry)
+    refute_same loaded, unchanged
+    assert_equal 1, unchanged.entities.first.end.position.x
+    assert_loaded_metadata(entry, unchanged)
+    loaded.entities.first.end.position.x = 99
+    attributes = loaded.instance_variable_get(:@attrs).dup
+    fresh = @controller.send(:load_catalog_definition, entry)
+    refute_same loaded, fresh
+    assert_equal 1, fresh.entities.first.end.position.x
+    assert_equal 99, loaded.entities.first.end.position.x
+    assert_equal attributes, loaded.instance_variable_get(:@attrs)
+    assert_loaded_metadata(entry, fresh)
+    assert_equal 2, staged_paths.length
+    staged_paths.each do |path|
+      refute File.exist?(path)
+      refute File.exist?(File.dirname(path))
+    end
+  end
+
+  def test_failed_isolated_catalog_load_removes_staged_bytes
+    entry, loaded = load_imported_definition_for_reuse
+    loaded.entities.first.end.position.x = 99
+    definitions = @model.definitions
+    original = definitions.method(:load)
+    staged_path = nil
+    definitions.define_singleton_method(:load) do |path|
+      if File.basename(path) == 'model.skp'
+        staged_path = path
+        raise IOError, 'native load failed'
+      end
+      original.call(path)
+    end
+    assert_raises(IOError) { @controller.send(:load_catalog_definition, entry) }
+    refute_nil staged_path
+    refute File.exist?(File.dirname(staged_path))
+    assert_equal 99, loaded.entities.first.end.position.x
+  end
+
+  def test_reused_import_checks_geometry_beyond_signature_sample_limit
+    entry, loaded = load_imported_definition_for_reuse(edge_count: 110)
+    assert_same loaded, @controller.send(:load_catalog_definition, entry)
+    loaded.entities[109].end.position.x = 99
+    assert_raises(ArgumentError) { @controller.send(:load_catalog_definition, entry) }
+  end
+
+  def test_reused_import_rejects_incomplete_verified_load_evidence
+    reader = Object.new
+    reader.define_singleton_method(:call) { |_definition| {digest: 'partial', complete: false, sampled: false} }
+    MafLibrary::DefinitionSignature.stub(:new, ->(**_options) { reader }) do
+      entry, = load_imported_definition_for_reuse
+      assert_raises(ArgumentError) { @controller.send(:load_catalog_definition, entry) }
+    end
+  end
+
+  def test_reused_import_rejects_missing_verified_load_evidence
+    entry, = load_imported_definition_for_reuse
+    @controller.instance_variable_set(:@verified_catalog_loads, {})
+    error = assert_raises(ArgumentError) { @controller.send(:load_catalog_definition, entry) }
+    assert_match(/новом проекте/, error.message)
+  end
+
   def test_catalog_load_rejects_file_whose_checksum_no_longer_matches_card
     serialized_selection
     saved = @controller.send(:add_selected_to_library, 'personal', 'Bench', 'Seats')

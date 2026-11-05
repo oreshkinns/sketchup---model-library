@@ -765,13 +765,11 @@ module MafLibrary
     end
 
     def update_catalog_details(id, tags, favorite)
-      catalog = @catalogs.catalog_for_entry(id)
-      if catalog
-        catalog.update_details(id, tags: tags, favorite: favorite)
-      elsif cloud&.find(id)
-        @settings.set_cloud_favorite(id, favorite)
+      entry = find_catalog_entry(id)
+      if entry['scope'] == 'cloud'
+        @settings.set_cloud_favorite(entry['id'], favorite)
       else
-        raise 'Модель не найдена'
+        @catalogs.catalog(entry['scope']).update_details(entry['id'], tags: tags, favorite: favorite)
       end
       refresh_catalog('Данные модели сохранены.')
     end
@@ -1214,7 +1212,8 @@ module MafLibrary
     end
 
     def find_catalog_entry(id)
-      @catalogs.find(id) || cloud&.find(id) || raise('Модель не найдена в каталоге')
+      entry = @catalogs.find(id) { |raw_id| cloud&.find(raw_id) }
+      entry || raise('Модель не найдена в каталоге')
     end
 
     def load_catalog_definition(entry)
@@ -1224,29 +1223,67 @@ module MafLibrary
         raise ArgumentError, 'Файл модели отличается от карточки каталога. Обновите библиотеку'
       end
       definitions = model.definitions
+      if @catalog_load_model != model
+        @catalog_load_model = model
+        @verified_catalog_loads = {}
+      end
       existing = definitions.to_a
       definition = definitions.load(path)
-      raise 'Файл каталога не содержит геометрии' if definition.entities.length.zero?
       if existing.include?(definition)
         # SketchUp may reuse a live definition for a previously loaded path.
         # File verification says nothing about edits to that live definition.
-        validate_reused_catalog_definition(definition, entry)
-      else
+        begin
+          validate_reused_catalog_definition(definition, entry)
+        rescue ArgumentError
+          definition = load_isolated_catalog_definition(path, entry, definitions, existing)
+        end
+      end
+      raise 'Файл каталога не содержит геометрии' if definition.entities.length.zero?
+      unless existing.include?(definition)
         stamp_catalog_metadata(definition, entry, verified_load: true)
+        unless entry['recognition_fingerprint']
+          signature = DefinitionSignature.new(mode: :catalog, full_snapshot: true).call(definition)
+          if signature[:complete] && !signature[:sampled] && signature[:digest]
+            @verified_catalog_loads[definition] = [entry.values_at('id', 'scope', 'version', 'sha256'), signature[:digest]]
+          end
+        end
       end
       definition
+    end
+
+    def load_isolated_catalog_definition(path, entry, definitions, existing)
+      # A unique, short-lived path bypasses SketchUp's path cache without
+      # changing a live definition. Never accept cache reuse from this load.
+      Dir.mktmpdir('maf-catalog-load-') do |folder|
+        candidate = File.join(folder, 'model.skp')
+        FileUtils.cp(path, candidate)
+        unless Digest::SHA256.file(candidate).hexdigest == entry['sha256']
+          raise ArgumentError, 'Файл модели отличается от карточки каталога. Обновите библиотеку'
+        end
+        definition = definitions.load(candidate)
+        if existing.include?(definition)
+          raise ArgumentError, 'SketchUp не загрузил отдельную копию модели каталога. Загрузите карточку в новом проекте'
+        end
+        raise 'Файл каталога не содержит геометрии' if definition.entities.length.zero?
+        definition
+      end
     end
 
     def validate_reused_catalog_definition(definition, entry)
       identity = {'catalog_id' => entry['id'], 'catalog_scope' => entry['scope'],
                   'catalog_version' => entry['version'], 'source_sha' => entry['sha256']}
       matches = identity.all? { |key, value| definition.get_attribute(Analyzer::DICTIONARY, key) == value }
-      if entry['recognition_fingerprint']
-        signature = DefinitionSignature.new(mode: :catalog).call(definition)
-        matches &&= signature[:complete] && !signature[:sampled] && signature[:digest] == entry['recognition_fingerprint']
+      expected = entry['recognition_fingerprint']
+      unless expected
+        # Trust only geometry observed after loading verified catalog bytes in
+        # this model. Persisted identity attributes alone survive project edits.
+        verified = @verified_catalog_loads && @verified_catalog_loads[definition]
+        expected = verified[1] if verified && verified[0] == identity.values
       end
+      signature = DefinitionSignature.new(mode: :catalog, full_snapshot: !entry['recognition_fingerprint']).call(definition) if expected
+      matches &&= expected && signature[:complete] && !signature[:sampled] && signature[:digest] == expected
       unless matches
-        raise ArgumentError, 'SketchUp вернул существующее изменённое определение. Загрузите карточку в новом проекте'
+        raise ArgumentError, 'SketchUp вернул существующее определение, содержимое которого изменено или не подтверждено. Загрузите карточку в новом проекте'
       end
     end
 
@@ -1313,15 +1350,19 @@ module MafLibrary
     end
 
     def set_thumbnail(id, data_url)
-      catalog = @catalogs.catalog_for_entry(id)
-      raise 'Для облачной модели изображение меняют в исходном каталоге' unless catalog
+      entry = find_catalog_entry(id)
+      raise 'Для облачной модели изображение меняют в исходном каталоге' if entry['scope'] == 'cloud'
+      catalog = @catalogs.catalog(entry['scope'])
+      id = entry['id']
       catalog.save_thumbnail_data(id, data_url)
       refresh_catalog('Изображение модели обновлено.')
     end
 
     def regenerate_thumbnail(id)
-      catalog = @catalogs.catalog_for_entry(id)
-      raise 'Для облачной модели изображение меняют в исходном каталоге' unless catalog
+      entry = find_catalog_entry(id)
+      raise 'Для облачной модели изображение меняют в исходном каталоге' if entry['scope'] == 'cloud'
+      catalog = @catalogs.catalog(entry['scope'])
+      id = entry['id']
       raise 'SketchUp не создал миниатюру компонента' unless catalog.generate_thumbnail(id) || ensure_thumbnail(catalog, id)
       refresh_catalog('Миниатюра модели создана SketchUp.')
     end
@@ -1444,8 +1485,8 @@ module MafLibrary
     end
 
     def place_model(id)
-      entry = @catalogs.find(id) || cloud&.find(id)
-      raise ArgumentError, 'Модель не найдена в библиотеке' unless entry
+      entry = find_catalog_entry(id)
+      id = entry['id']
       current = model
       current.start_operation('Загрузить МАФ из каталога', true)
       begin
@@ -1487,8 +1528,8 @@ module MafLibrary
         raise ArgumentError, 'Поворот должен быть от 0 до 180 градусов' unless surface_options[:rotation_degrees].between?(0, 180)
       end
       raise 'Завершите редактирование компонента перед раскладкой' if model.active_path
-      entry = @catalogs.find(id) || cloud&.find(id)
-      raise 'Модель не найдена в библиотеке' unless entry
+      entry = find_catalog_entry(id)
+      id = entry['id']
       definition = load_catalog_definition(entry)
       if entry['scope'] != 'cloud'
         catalog = @catalogs.catalog(entry['scope'])

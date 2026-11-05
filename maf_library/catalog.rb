@@ -4,6 +4,7 @@ require 'fileutils'
 require 'securerandom'
 require 'base64'
 require 'time'
+require 'monitor'
 require_relative 'metadata'
 require_relative 'definition_signature'
 require_relative 'selected_export'
@@ -18,6 +19,8 @@ module MafLibrary
     def initialize(root, removal_allowed: true)
       @root = root
       @removal_allowed = removal_allowed
+      @transaction_monitor = Monitor.new
+      @transaction_depth = 0
     end
 
     def entries
@@ -211,45 +214,65 @@ module MafLibrary
       FileUtils.mkdir_p(inbox)
       items = entries
       removed = removed_entries
+      staging = File.join(root, ".inbox-#{SecureRandom.uuid}")
+      FileUtils.mkdir_p(staging)
+      candidates = {}
+      installed = []
       added = updated = 0
       Dir.glob(File.join(inbox, '**', '*')).sort.each do |source|
         next unless File.file?(source) && File.extname(source).casecmp?('.skp')
         real = File.realpath(source)
-        next unless real.start_with?(File.realpath(inbox) + File::SEPARATOR)
-        relative = real.delete_prefix(File.realpath(inbox) + File::SEPARATOR).tr('\\', '/')
+        relative = inbox_relative_path(real, inbox)
+        next unless relative
         category = relative.include?('/') ? relative.split('/').first : 'Другое'
         sha = Digest::SHA256.file(real).hexdigest
         next if removed.any? { |item| item['inbox_path'] == relative || item['sha256'] == sha }
         entry = items.find { |item| item['inbox_path'] == relative } ||
                 items.find { |item| item['sha256'] == sha }
-        if entry
-          if entry['sha256'] != sha
-            destination = file_for(entry['id'])
-            temporary = "#{destination}.tmp"
-            FileUtils.cp(real, temporary)
-            FileUtils.mv(temporary, destination, force: true)
-            entry['sha256'] = sha
-            entry['version'] = entry['version'].to_i + 1
-            entry['file_size_bytes'] = File.size(real)
-            updated += 1
-          end
-          entry['inbox_path'] = relative
-        else
-          id = SecureRandom.uuid
+        if entry.nil? || entry['sha256'] != sha
+          id = entry ? entry['id'] : SecureRandom.uuid
+          candidate = File.join(staging, "#{id}.skp")
+          FileUtils.cp(real, candidate)
+          raise IOError, 'Файл в папке изменился во время копирования. Повторите проверку' unless Digest::SHA256.file(candidate).hexdigest == sha
           destination = File.join(root, 'models', "#{id}.skp")
-          FileUtils.mkdir_p(File.dirname(destination))
-          FileUtils.cp(real, destination)
-          items << {'id' => id, 'name' => File.basename(real, '.skp'), 'category' => category,
-                    'version' => 1, 'sha256' => sha, 'file_size_bytes' => File.size(real),
-                    'tags' => [], 'favorite' => false, 'inbox_path' => relative}
-          added += 1
+          candidates[destination] = candidate
+          if entry
+            entry['version'] = entry['version'].to_i + 1
+            # Confirmation and measurements describe the previous bytes. Keep
+            # names, sections, tags, favorites and usage history assigned by users.
+            %w[maf_confirmed recognition_fingerprint recognition_source bbox_mm
+               faces_count edges_count materials_count thumbnail].each { |key| entry.delete(key) }
+            updated += 1
+          else
+            entry = {'id' => id, 'name' => File.basename(real, File.extname(real)), 'category' => category,
+                     'version' => 1, 'tags' => [], 'favorite' => false}
+            items << entry
+            added += 1
+          end
+          entry['sha256'] = sha
+          entry['file_size_bytes'] = File.size(candidate)
         end
-      ensure
-        File.delete(temporary) if defined?(temporary) && temporary && File.file?(temporary)
-        temporary = nil
+        entry['inbox_path'] = relative
+      end
+      candidates.each do |destination, candidate|
+        FileUtils.mkdir_p(File.dirname(destination))
+        backup = File.file?(destination) ? File.join(staging, "#{File.basename(destination)}.rollback") : nil
+        File.rename(destination, backup) if backup
+        installed << [destination, backup]
+        File.rename(candidate, destination)
       end
       save(items)
+      cleanup = true
       {added: added, updated: updated}
+    rescue StandardError
+      Array(installed).reverse_each do |destination, backup|
+        File.delete(destination) if File.file?(destination)
+        File.rename(backup, destination) if backup
+      end
+      cleanup = true
+      raise
+    ensure
+      FileUtils.remove_entry(staging) if cleanup && staging && File.directory?(staging)
     end
 
     def thumbnail_path(id, entry: nil)
@@ -305,6 +328,42 @@ module MafLibrary
 
     private
 
+    # Filesystem identity handles Windows short names and drive aliases without
+    # accepting a symlink whose resolved target lies outside the inbox.
+    def inbox_relative_path(real, inbox)
+      parts = [File.basename(real)]
+      parent = File.dirname(real)
+      loop do
+        return parts.join('/') if File.identical?(parent, inbox)
+        ancestor = File.dirname(parent)
+        return nil if ancestor == parent
+        parts.unshift(File.basename(parent))
+        parent = ancestor
+      end
+    end
+
+    # Keep the OS lock file in place: unlinking it would let another process
+    # lock a different inode. The OS releases flock even after a process exits.
+    # Nested writes (import -> thumbnail -> update_entry) share one transaction.
+    def with_catalog_transaction
+      @transaction_monitor.synchronize do
+        return yield if @transaction_depth.positive?
+        FileUtils.mkdir_p(root)
+        File.open(File.join(root, '.catalog.lock'), 'a') do |lock|
+          unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+            raise IOError, 'Каталог изменяется в другом процессе. Повторите действие после завершения записи'
+          end
+          @transaction_depth += 1
+          begin
+            yield
+          ensure
+            @transaction_depth -= 1
+            lock.flock(File::LOCK_UN)
+          end
+        end
+      end
+    end
+
     def save_version_copy(definition, destination)
       return definition.save_copy(destination) if definition.respond_to?(:save_copy)
       # SketchUp 2021 save_as permanently changes the definition's file path.
@@ -354,17 +413,23 @@ module MafLibrary
       retained = removed_entries.reject { |entry| items.any? { |item| item['id'] == entry['id'] } }
       items = items + retained
       FileUtils.mkdir_p(root)
-      temporary = "#{manifest_path}.tmp"
+      temporary = "#{manifest_path}.#{SecureRandom.uuid}.tmp"
       backup = "#{manifest_path}.bak"
       File.open(temporary, 'w:UTF-8') do |file|
         file.write(JSON.pretty_generate(items))
         file.flush
         file.fsync
       end
-      File.delete(backup) if File.file?(backup)
+      File.delete(backup) if File.file?(backup) && File.file?(manifest_path)
       File.rename(manifest_path, backup) if File.file?(manifest_path)
       File.rename(temporary, manifest_path)
-      File.delete(backup) if File.file?(backup)
+      # The manifest has committed. A locked backup can be cleaned up by the
+      # next write, without making callers roll back the newly committed models.
+      begin
+        File.delete(backup) if File.file?(backup)
+      rescue SystemCallError
+        nil
+      end
     rescue StandardError
       File.rename(backup, manifest_path) if backup && File.file?(backup) && !File.file?(manifest_path)
       raise
@@ -372,4 +437,16 @@ module MafLibrary
       File.delete(temporary) if temporary && File.file?(temporary)
     end
   end
+
+  # Wrap the whole read/modify/write action, rather than only its final save.
+  # Prepending keeps keyword arguments and the existing rollback scopes intact.
+  module CatalogTransactions
+    %i[remove import add_definition update_definition_version rename assign_section
+       update_details mark_used scan_inbox save_thumbnail_data generate_thumbnail].each do |method|
+      define_method(method) do |*args, **keywords, &block|
+        with_catalog_transaction { super(*args, **keywords, &block) }
+      end
+    end
+  end
+  Catalog.prepend(CatalogTransactions)
 end

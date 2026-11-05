@@ -53,6 +53,7 @@ module MafLibrary
       raise ArgumentError, 'Введите название модели' if clean.empty?
       definition = definitions(rows).first
       catalog_id = definition.get_attribute(Analyzer::DICTIONARY, 'catalog_id')
+      linked_catalog = catalog_for(catalog_id, definition)
       operation('Переименовать модель МАФ') do
         if rows.first['kind'] == 'group'
           @report['references'].fetch(definition.object_id)[:refs].each_value { |ref| ref[:entity].name = clean }
@@ -60,7 +61,7 @@ module MafLibrary
           definition.name = clean
         end
       end
-      catalog_for(catalog_id)&.rename(catalog_id, definition.name) if catalog_id
+      linked_catalog&.rename(catalog_id, definition.name) if catalog_id
       clean
     end
 
@@ -84,6 +85,11 @@ module MafLibrary
       target = @report['references'].fetch(selected_id.to_i)[:definition]
       refs = items.flat_map { |item| item[:refs].values }.uniq { |ref| ref[:entity].object_id }
       validate_rename_refs(refs)
+      linked_catalogs = items.to_h do |item|
+        definition = item[:definition]
+        id = definition.get_attribute(Analyzer::DICTIONARY, 'catalog_id')
+        [definition, catalog_for(id, definition)]
+      end
       if mode == 'merge'
         if group['kind'] == 'group'
           merge_groups(refs, selected_id, clean)
@@ -107,7 +113,7 @@ module MafLibrary
       end
       items.each do |item|
         catalog_id = item[:definition].get_attribute(Analyzer::DICTIONARY, 'catalog_id')
-        catalog_for(catalog_id)&.rename(catalog_id, item[:definition].name) if catalog_id
+        linked_catalogs[item[:definition]]&.rename(catalog_id, item[:definition].name) if catalog_id
       end
       clean
     end
@@ -117,12 +123,13 @@ module MafLibrary
       clean = section.to_s.strip
       raise ArgumentError, 'Выберите раздел' if clean.empty?
       list = definitions(rows)
+      linked_catalogs = list.to_h { |definition| [definition, catalog_for(definition.get_attribute(Analyzer::DICTIONARY, 'catalog_id'), definition)] }
       operation('Переместить МАФ в раздел') do
         list.each { |definition| definition.set_attribute(Analyzer::DICTIONARY, 'category', clean) }
       end
       list.each do |definition|
         catalog_id = definition.get_attribute(Analyzer::DICTIONARY, 'catalog_id')
-        catalog_for(catalog_id)&.assign_section(catalog_id, clean) if catalog_id
+        linked_catalogs[definition]&.assign_section(catalog_id, clean) if catalog_id
       end
       list.length
     end
@@ -248,9 +255,12 @@ module MafLibrary
       definitions(rows).flat_map { |definition| @report['references'][definition.object_id][:refs].values }
     end
 
-    def catalog_for(id)
+    def catalog_for(id, definition)
       return nil unless id && @catalog
-      @catalog.respond_to?(:catalog_for_entry) ? @catalog.catalog_for_entry(id) : @catalog
+      scope = definition.get_attribute(Analyzer::DICTIONARY, 'catalog_scope').to_s
+      return nil if scope == 'cloud'
+      identity = scope.empty? ? id : "#{scope}:#{id}"
+      @catalog.respond_to?(:catalog_for_entry) ? @catalog.catalog_for_entry(identity) : @catalog
     end
 
     def operation(name)

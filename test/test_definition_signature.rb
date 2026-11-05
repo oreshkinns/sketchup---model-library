@@ -230,12 +230,30 @@ class DefinitionSignatureTest
     assert fingerprint(second)[:complete]
     refute_equal fingerprint(first)[:digest], fingerprint(second)[:digest]
     duplicate = MafLibrary::DefinitionSignature.new(mode: :duplicate)
-    assert_equal duplicate.call(first)[:digest], duplicate.call(second)[:digest]
+    refute_equal duplicate.call(first)[:digest], duplicate.call(second)[:digest]
   end
 
   def test_unreadable_api_behavior_is_incomplete
     definition = FakeDefinition.new('A', [FakeEdge.new])
     definition.define_singleton_method(:behavior) { ApiBehavior.new(false, true) }
     refute fingerprint(definition)[:complete]
+    refute MafLibrary::DefinitionSignature.new(mode: :duplicate).call(definition)[:complete]
+  end
+
+  def test_duplicate_behavior_requires_all_native_getters
+    definition = FakeDefinition.new('A', [FakeEdge.new])
+    definition.define_singleton_method(:behavior) { Object.new }
+    refute MafLibrary::DefinitionSignature.new(mode: :duplicate).call(definition)[:complete]
+  end
+
+  def test_soft_and_smooth_edges_cannot_authorize_automatic_replacement
+    %i[soft? smooth?].each do |property|
+      first = FakeDefinition.new('A', [FakeEdge.new])
+      second = FakeDefinition.new('B', [FakeEdge.new])
+      first.entities.first.define_singleton_method(property) { false }
+      second.entities.first.define_singleton_method(property) { true }
+      report = MafLibrary::Analyzer.new(FakeModel.new([Sketchup::ComponentInstance.new(first), Sketchup::ComponentInstance.new(second)])).scan
+      refute report['duplicates'].any? { |group| group['replaceable'] }, property.to_s
+    end
   end
 end

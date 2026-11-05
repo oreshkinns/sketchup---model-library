@@ -296,9 +296,7 @@ module MafLibrary
     def entity_state_token(entity)
       return {} if @mode == :geometry
       state = {}
-      if @mode == :catalog
-        %i[soft? smooth?].each { |method| state[method] = entity.public_send(method) if entity.respond_to?(method) }
-      end
+      %i[soft? smooth?].each { |method| state[method] = entity.public_send(method) if entity.respond_to?(method) }
       %i[hidden? casts_shadows? receives_shadows?].each do |method|
         state[method] = entity.public_send(method) if entity.respond_to?(method)
       end
@@ -336,17 +334,13 @@ module MafLibrary
       return {} if @mode == :geometry
       return {} unless definition.respond_to?(:behavior)
       behavior = definition.behavior
-      methods = if @mode == :catalog
-                  %i[always_face_camera? cuts_opening? is2d? snapto no_scale_mask? shadows_face_sun?]
-                else
-                  %i[always_face_camera cuts_opening snaps_to face_camera locked_to glued_to]
-                end
-      @uncertain = true if @mode == :catalog && methods.any? { |method| !behavior.respond_to?(method) }
+      methods = %i[always_face_camera? cuts_opening? is2d? snapto no_scale_mask? shadows_face_sun?]
+      @uncertain = true if methods.any? { |method| !behavior.respond_to?(method) }
       methods.each_with_object({}) do |method, result|
         result[method] = stable_value(behavior.public_send(method)) if behavior.respond_to?(method)
       end
     rescue StandardError
-      @uncertain = true if @mode == :catalog
+      @uncertain = true
       {}
     end
 

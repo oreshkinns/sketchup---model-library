@@ -1941,7 +1941,7 @@ export function initializeRuntime() {
               )
               .concat(
                 (state.catalog || []).map((entry) => ({
-                  id: `catalog:${entry.id}`,
+                  id: `catalog:${entry.scope}:${entry.id}`,
                   name: `${entry.name} · ${scopeName(entry.scope)}`,
                   instances: 0,
                 })),
@@ -2026,7 +2026,7 @@ export function initializeRuntime() {
         ". Карточка исчезнет из каталога. Размещения в проекте, файл .skp и миниатюра останутся на месте. Повторный анализ не восстановит карточку; добавить её снова можно вручную.";
     }
     if (kind === "paste") {
-      const item = (state.catalog || []).find((x) => x.id === imageTarget);
+      const item = catalogItem(imageTarget);
       $("modal-title").textContent =
         `Изображение: ${item ? item.name : "модель"}`;
       $("modal-description").textContent =
@@ -2436,7 +2436,7 @@ export function initializeRuntime() {
         "success",
       );
     } else if (action === "set_thumbnail") {
-      const entry = state.catalog.find((x) => x.id === args[0]);
+      const entry = catalogItem(args[0]);
       if (entry) entry.thumbnail = args[1];
       status("Демо: изображение обновлено.", "success");
     } else if (action === "set_cloud_url") {
@@ -2570,6 +2570,13 @@ export function initializeRuntime() {
       call("replace_duplicates", duplicateGroup.id, value);
     }
     closeModal();
+  }
+  function catalogIdentity(element, id) {
+    const key = element.closest("[data-card-key]")?.dataset.cardKey;
+    return key || id;
+  }
+  function catalogItem(identity) {
+    return (state.catalog || []).find((item) => `${item.scope}:${item.id}` === identity);
   }
   function imageData(file, id) {
     if (!file) return;
@@ -2850,19 +2857,19 @@ export function initializeRuntime() {
     }
     const favorite = event.target.closest("[data-favorite]");
     if (favorite) {
-      const item = state.catalog.find(
-        (x) => x.id === favorite.dataset.favorite,
-      );
+      const identity = catalogIdentity(favorite, favorite.dataset.favorite);
+      const item = catalogItem(identity);
       if (item) {
         item.favorite = !item.favorite;
-        call("update_catalog_details", item.id, item.tags || [], item.favorite);
+        call("update_catalog_details", identity, item.tags || [], item.favorite);
         renderCatalog();
       }
       return;
     }
     const tags = event.target.closest("[data-tags]");
     if (tags) {
-      const item = state.catalog.find((x) => x.id === tags.dataset.tags);
+      const identity = catalogIdentity(tags, tags.dataset.tags);
+      const item = catalogItem(identity);
       if (item) {
         const answer = prompt(
           "Теги через запятую",
@@ -2873,7 +2880,7 @@ export function initializeRuntime() {
             .split(",")
             .map((x) => x.trim().toLowerCase())
             .filter(Boolean);
-          call("update_catalog_details", item.id, item.tags, !!item.favorite);
+          call("update_catalog_details", identity, item.tags, !!item.favorite);
           renderCatalog();
         }
       }
@@ -2914,38 +2921,38 @@ export function initializeRuntime() {
           status("Проверьте плотность, отступ, поворот и seed.", "error");
           return;
         }
-        call("start_array", array.dataset.array, "surface", 1000, options);
+        call("start_array", catalogIdentity(array, array.dataset.array), "surface", 1000, options);
       } else {
         const answer = prompt("Шаг в миллиметрах (100–10000)", "1000");
         if (answer !== null) {
           const value = Number(answer);
           if (!Number.isFinite(value) || value < 100 || value > 10000)
             status("Шаг должен быть от 100 до 10000 мм.", "error");
-          else call("start_array", array.dataset.array, "line", value);
+          else call("start_array", catalogIdentity(array, array.dataset.array), "line", value);
         }
       }
       return;
     }
     const place = event.target.closest("[data-place]");
     if (place) {
-      call("place_model", place.dataset.place);
+      call("place_model", catalogIdentity(place, place.dataset.place));
       return;
     }
     const auto = event.target.closest("[data-thumb-auto]");
     if (auto) {
-      call("regenerate_thumbnail", auto.dataset.thumbAuto);
+      call("regenerate_thumbnail", catalogIdentity(auto, auto.dataset.thumbAuto));
       return;
     }
     const file = event.target.closest("[data-thumb-file]");
     if (file) {
-      imageTarget = file.dataset.thumbFile;
+      imageTarget = catalogIdentity(file, file.dataset.thumbFile);
       $("image-file").value = "";
       $("image-file").click();
       return;
     }
     const paste = event.target.closest("[data-thumb-paste]");
     if (paste) {
-      imageTarget = paste.dataset.thumbPaste;
+      imageTarget = catalogIdentity(paste, paste.dataset.thumbPaste);
       showModal("paste", paste);
       return;
     }

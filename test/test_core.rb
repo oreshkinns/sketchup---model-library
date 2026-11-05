@@ -308,7 +308,11 @@ class PackTransferTest < Minitest::Test
       MafLibrary::PackTransfer.export(original, pack, ids: [id])
       asset = File.join(pack, 'models', "#{id}.skp")
       File.delete(asset)
-      File.symlink(source, asset)
+      begin
+        File.symlink(source, asset)
+      rescue Errno::EACCES, Errno::EPERM, NotImplementedError => error
+        skip "Host cannot create symlinks: #{error.class}"
+      end
       assert_raises(MafLibrary::PackTransfer::InvalidPack) do
         MafLibrary::PackTransfer.import(MafLibrary::Catalog.new(File.join(dir, 'target')), pack)
       end
