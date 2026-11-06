@@ -1132,3 +1132,31 @@ class ControllerTest
     assert_empty @controller.instance_variable_get(:@preview_requests)
   end
 end
+
+class ControllerTest
+  def test_coordinator_publication_delivers_success_through_real_controller_sink
+    Dir.mktmpdir do |root|
+      path = File.join(root, 'source.skp'); File.write(path, 'source')
+      published = []; events = []; refreshed = []
+      catalog = Object.new
+      catalog.define_singleton_method(:preview_target) { |id, explicit:| {source_path: path, source_sha256: Digest::SHA256.file(path).hexdigest, revision: 1, scope: 'personal'} }
+      catalog.define_singleton_method(:publish_generated_thumbnail) { |*args, **options| published << options; true }
+      worker = Object.new
+      worker.define_singleton_method(:start) { |**| Object.new }
+      worker.define_singleton_method(:alive?) { |_| true }
+      worker.define_singleton_method(:stop) { |_| true }
+      worker.define_singleton_method(:retry_cleanup) { true }
+      @controller.instance_variable_set(:@preview_requests, {})
+      @controller.define_singleton_method(:push) { |payload| events << payload[:preview_event] }
+      @controller.define_singleton_method(:refresh_catalog) { |message| refreshed << message }
+      queue = MafLibrary::PreviewCoordinator.new(process: worker, root: File.join(root, 'jobs'), event_sink: @controller.method(:preview_event))
+      queue.enqueue(catalog: catalog, id: 'new'); queue.tick
+      directory = Dir[File.join(root, 'jobs', '*')].first
+      File.write(File.join(directory, 'status.json'), '{}')
+      MafLibrary::PreviewProtocol.stub(:validate_result, {png_path: 'validated', provenance: {}}) { queue.tick }
+      assert_equal 1, published.length
+      assert_equal ['queued', 'running', 'succeeded'], events.map { |event| event[:state] }
+      assert_equal [nil], refreshed
+    end
+  end
+end
