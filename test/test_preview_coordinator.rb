@@ -1,6 +1,7 @@
 require 'minitest/autorun'
 require 'tmpdir'
 require_relative '../maf_library/preview_coordinator'
+require_relative '../maf_library/preview_process'
 class PreviewCoordinatorTest < Minitest::Test
   class Worker
     attr_accessor :count, :stops, :blocked
@@ -57,4 +58,72 @@ class PreviewCoordinatorTest < Minitest::Test
     @queue.enqueue(catalog:@catalog,id:'a'); @queue.tick; @queue.shutdown
     assert_equal 1,@worker.stops; assert_equal 'cancelled',@events.last[:state]
   end
+  def test_queued_cancellation_never_launches
+    id=@queue.enqueue(catalog:@catalog,id:'a'); @queue.cancel(id); @queue.tick
+    assert_equal 0,@worker.count
+    assert_equal 'cancelled',@events.last[:state]
+  end
+  def test_late_output_after_cancel_is_ignored
+    id=@queue.enqueue(catalog:@catalog,id:'a'); @queue.tick
+    directory=Dir[File.join(@dir,'jobs','*')].first
+    @queue.cancel(id)
+    refute File.exist?(directory)
+    FileUtils.mkdir_p(directory); File.write(File.join(directory,'status.json'),'{}')
+    @queue.tick
+    assert_equal 'cancelled',@events.last[:state]
+    assert_equal 1,@worker.stops
+  end
+  def test_unowned_directory_is_preserved
+    other=File.join(@dir,'jobs','unrelated'); FileUtils.mkdir_p(other)
+    File.write(File.join(other,'keep'),'keep')
+    id=@queue.enqueue(catalog:@catalog,id:'a'); @queue.tick; @queue.cancel(id)
+    assert_equal 'keep',File.read(File.join(other,'keep'))
+  end
+  def test_started_identity_mismatch_fails
+    @queue.enqueue(catalog:@catalog,id:'a'); @queue.tick
+    directory=Dir[File.join(@dir,'jobs','*')].first
+    File.write(File.join(directory,'started.json'),'{}'); @queue.tick
+    assert_equal 'failed',@events.last[:state]
+    assert_equal 1,@worker.stops
+  end
+  def test_exited_handle_is_not_stopped_twice
+    def @worker.alive?(_); false; end
+    @queue.enqueue(catalog:@catalog,id:'a'); @queue.tick; @queue.tick
+    assert_equal 0,@worker.stops
+    assert_equal 'failed',@events.last[:state]
+  end
+  def test_publication_targets_have_independent_guards_and_errors
+    @catalog.define_singleton_method(:publish_generated_thumbnail) do |id, **args|
+      raise 'write failure' if id=='bad'
+      id=='good' && args[:expected_thumbnail_revision]=='good'
+    end
+    %w[good bad stale].each { |id| @queue.enqueue(catalog:@catalog,id:id) }
+    @queue.tick
+    directory=Dir[File.join(@dir,'jobs','*')].first
+    File.write(File.join(directory,'status.json'),'{}')
+    protocol=MafLibrary::PreviewProtocol
+    protocol.stub(:validate_result,{png_path:'validated'}) { @queue.tick }
+    terminal=@events.select{|e| %w[succeeded failed cancelled].include?(e[:state])}
+    assert_equal %w[succeeded failed cancelled],terminal.map{|e|e[:state]}
+    assert_equal %w[good bad stale],terminal.map{|e|e[:id]}
+    assert_equal 1,@worker.stops
+  end
+  def test_ownership_failure_blocks_next_launch
+    def @worker.stop(_); raise MafLibrary::PreviewProcess::OwnershipError,'PID reused'; end
+    @queue.enqueue(catalog:@catalog,id:'a'); @queue.tick
+    @time=60
+    assert_raises(MafLibrary::PreviewProcess::OwnershipError) { @queue.tick }
+    assert_equal 1,@worker.count
+  end
+  def test_settings_root_independent_of_catalog
+    require_relative '../maf_library/settings'
+    settings=MafLibrary::Settings.new(File.join(@dir,'settings.json'),personal:@dir,shared:'//remote/catalog')
+    root=settings.preview_worker_root
+    refute_includes root,'remote'
+    refute_includes root,'catalog'
+    assert root.end_with?('preview-worker')
+  end
 end
+
+
+

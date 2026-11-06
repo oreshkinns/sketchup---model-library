@@ -54,8 +54,12 @@ module MafLibrary
           stop(job)
           job[:targets].each do |target|
             s = target[:snapshot]
-            ok = target[:catalog].publish_generated_thumbnail(target[:id], validated_result: result, expected_sha256: s[:source_sha256], expected_thumbnail_revision: s[:revision])
-            emit(target, ok ? 'succeeded' : 'cancelled')
+            begin
+              ok = target[:catalog].publish_generated_thumbnail(target[:id], validated_result: result, expected_sha256: s[:source_sha256], expected_thumbnail_revision: s[:revision])
+              emit(target, ok ? 'succeeded' : 'cancelled')
+            rescue StandardError => error
+              emit(target, 'failed', error.message)
+            end
           end
           finish(job, nil)
         elsif !@process.alive?(job[:handle])
@@ -114,6 +118,7 @@ module MafLibrary
     end
   end
 end
+
 
 
 
