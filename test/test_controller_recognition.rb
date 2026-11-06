@@ -86,7 +86,7 @@ end
 
 class SerializedControllerDefinitions < Array
   attr_accessor :reused_definition
-  def load(path)
+  def load(path, **_options)
     return reused_definition if reused_definition
     definition = SerializedControllerDefinition.load(path)
     self << definition
@@ -745,7 +745,7 @@ class ControllerRecognitionTest < Minitest::Test
     attributes = loaded.instance_variable_get(:@attrs).dup
     definitions = @model.definitions
     catalog_path = @catalogs.catalog('personal').file_for(entry['id'])
-    definitions.define_singleton_method(:load) do |path|
+    definitions.define_singleton_method(:load) do |path, **_options|
       if path == catalog_path
         loaded
       else
@@ -762,6 +762,27 @@ class ControllerRecognitionTest < Minitest::Test
     assert_loaded_metadata(entry, fresh)
   end
 
+  def test_native_guid_reuse_accepts_verified_pixels_and_rejects_pixel_edits
+    entry, loaded = load_imported_definition_for_reuse
+    pixels = Struct.new(:data, :width, :height, :bits_per_pixel, :row_padding).new('abc', 1, 1, 24, 0)
+    texture = Struct.new(:filename, :width, :height, :image_rep).new('wood.png', 10, 10, pixels)
+    material = Struct.new(:name, :texture, :color, :alpha).new('Wood', texture, Struct.new(:to_a).new([1, 2, 3]), 1)
+    loaded.entities.first.define_singleton_method(:material) { material }
+    @model.definitions.delete(loaded)
+    @model.definitions.define_singleton_method(:load) do |_path, **_options|
+      self << loaded unless include?(loaded)
+      loaded
+    end
+    assert_same loaded, @controller.send(:load_catalog_definition, entry)
+    assert_same loaded, @controller.send(:load_catalog_definition, entry)
+    placed = []
+    @model.define_singleton_method(:place_component) { |definition| placed << definition; true }
+    2.times { @controller.send(:place_model, entry['id']) }
+    assert_equal [loaded, loaded], placed
+    pixels.data = 'xyz'
+    assert_raises(ArgumentError) { @controller.send(:load_catalog_definition, entry) }
+  end
+
   def test_reused_textured_import_loads_fresh_verified_bytes_without_changing_live_definition
     serialized_selection
     source = File.join(@dir, 'textured.skp')
@@ -775,7 +796,7 @@ class ControllerRecognitionTest < Minitest::Test
     texture = Struct.new(:filename, :width, :height).new('wood.png', 10, 10)
     material = Struct.new(:name, :texture, :color, :alpha).new('Wood', texture, Struct.new(:to_a).new([1, 2, 3]), 1)
     staged_paths = []
-    definitions.define_singleton_method(:load) do |path|
+    definitions.define_singleton_method(:load) do |path, **_options|
       if path == catalog_path && !empty?
         first
       else
@@ -811,7 +832,7 @@ class ControllerRecognitionTest < Minitest::Test
     definitions = @model.definitions
     original = definitions.method(:load)
     staged_path = nil
-    definitions.define_singleton_method(:load) do |path|
+    definitions.define_singleton_method(:load) do |path, **_options|
       if File.basename(path) == 'model.skp'
         staged_path = path
         raise IOError, 'native load failed'
@@ -874,7 +895,7 @@ class ControllerRecognitionTest < Minitest::Test
     fresh_model_for_catalog_load
     definitions = @model.definitions
     original_load = definitions.method(:load)
-    definitions.define_singleton_method(:load) do |path|
+    definitions.define_singleton_method(:load) do |path, **_options|
       definition = original_load.call(path)
       definition.entities = NativeControllerEntities.new(definition.entities)
       definition
@@ -894,7 +915,7 @@ class ControllerRecognitionTest < Minitest::Test
     fresh_model_for_catalog_load
     definition = SerializedControllerDefinition.new('Empty', [])
     definition.entities = NativeControllerEntities.new([])
-    @model.definitions.define_singleton_method(:load) { |_| definition }
+    @model.definitions.define_singleton_method(:load) { |_, **_options| definition }
     error = assert_raises(RuntimeError) { @controller.send(:load_catalog_definition, @catalogs.find(saved['id'])) }
     assert_match(/не содержит геометрии/, error.message)
   end

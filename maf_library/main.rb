@@ -1,3 +1,4 @@
+require_relative 'definition_loader'
 require 'json'
 require 'digest'
 require 'tmpdir'
@@ -1243,7 +1244,7 @@ module MafLibrary
         @verified_catalog_loads = {}
       end
       existing = definitions.to_a
-      definition = definitions.load(path)
+      definition = DefinitionLoader.load(definitions, path)
       if existing.include?(definition)
         # SketchUp may reuse a live definition for a previously loaded path.
         # File verification says nothing about edits to that live definition.
@@ -1256,11 +1257,9 @@ module MafLibrary
       raise 'Файл каталога не содержит геометрии' if definition.entities.length.zero?
       unless existing.include?(definition)
         stamp_catalog_metadata(definition, entry, verified_load: true)
-        unless entry['recognition_fingerprint']
-          signature = DefinitionSignature.new(mode: :catalog, full_snapshot: true).call(definition)
-          if signature[:complete] && !signature[:sampled] && signature[:digest]
-            @verified_catalog_loads[definition] = [entry.values_at('id', 'scope', 'version', 'sha256'), signature[:digest]]
-          end
+        signature = DefinitionSignature.new(mode: :catalog, full_snapshot: true, portable_materials: true).call(definition)
+        if signature[:complete] && !signature[:sampled] && signature[:digest]
+          @verified_catalog_loads[definition] = [entry.values_at('id', 'scope', 'version', 'sha256'), signature[:digest]]
         end
       end
       definition
@@ -1275,7 +1274,7 @@ module MafLibrary
         unless Digest::SHA256.file(candidate).hexdigest == entry['sha256']
           raise ArgumentError, 'Файл модели отличается от карточки каталога. Обновите библиотеку'
         end
-        definition = definitions.load(candidate)
+        definition = DefinitionLoader.load(definitions, candidate)
         if existing.include?(definition)
           raise ArgumentError, 'SketchUp не загрузил отдельную копию модели каталога. Загрузите карточку в новом проекте'
         end
@@ -1288,14 +1287,13 @@ module MafLibrary
       identity = {'catalog_id' => entry['id'], 'catalog_scope' => entry['scope'],
                   'catalog_version' => entry['version'], 'source_sha' => entry['sha256']}
       matches = identity.all? { |key, value| definition.get_attribute(Analyzer::DICTIONARY, key) == value }
-      expected = entry['recognition_fingerprint']
-      unless expected
-        # Trust only geometry observed after loading verified catalog bytes in
-        # this model. Persisted identity attributes alone survive project edits.
-        verified = @verified_catalog_loads && @verified_catalog_loads[definition]
-        expected = verified[1] if verified && verified[0] == identity.values
-      end
-      signature = DefinitionSignature.new(mode: :catalog, full_snapshot: !entry['recognition_fingerprint']).call(definition) if expected
+      # Session evidence hashes embedded pixels and is separate from persisted
+      # recognition fingerprints. It is trusted only for this exact card revision.
+      verified = @verified_catalog_loads && @verified_catalog_loads[definition]
+      session_verified = verified && verified[0] == identity.values
+      expected = session_verified ? verified[1] : entry['recognition_fingerprint']
+      signature = DefinitionSignature.new(mode: :catalog, full_snapshot: !!session_verified,
+        portable_materials: !!session_verified).call(definition) if expected
       matches &&= expected && signature[:complete] && !signature[:sampled] && signature[:digest] == expected
       unless matches
         raise ArgumentError, 'SketchUp вернул существующее определение, содержимое которого изменено или не подтверждено. Загрузите карточку в новом проекте'

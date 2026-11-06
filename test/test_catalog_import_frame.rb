@@ -46,7 +46,7 @@ class CatalogImportFrameTest < Minitest::Test
       definition = Object.new
       definition.define_singleton_method(:save_copy) { |path| File.write(path, 'normalized'); true }
       definitions = Object.new
-      definitions.define_singleton_method(:load) { |path| raise unless path == source; definition }
+      definitions.define_singleton_method(:load) { |path, **_options| raise unless path == source; definition }
       events = []
       model = Object.new
       model.define_singleton_method(:definitions) { definitions }

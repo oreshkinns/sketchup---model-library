@@ -441,10 +441,10 @@ module MafLibrary
     end
 
     # A filename and dimensions do not prove that two image files have the
-    # same pixels. Until texture bytes are compared, matching signatures that
-    # contain textures are review candidates only.
+    # same pixels. Portable mode validates every texture in material_token and
+    # marks unreadable pixels uncertain; legacy fingerprints remain incomplete.
     def textured?(entity)
-      return false if @mode == :geometry
+      return false if @mode == :geometry || @portable_materials
       %i[material back_material].any? do |method|
         entity.respond_to?(method) && (material = entity.public_send(method)) &&
           MATERIAL_TEXTURES.any? { |property| material.respond_to?(property) && material.public_send(property) }

@@ -1,3 +1,4 @@
+require_relative 'definition_loader'
 require 'json'
 require 'digest'
 require 'fileutils'
@@ -66,7 +67,7 @@ module MafLibrary
         started = model.start_operation('Подготовить импорт МАФ', true)
         raise 'SketchUp не начал импорт компонента' unless started
         begin
-          definition = model.definitions.load(source)
+          definition = DefinitionLoader.load(model.definitions, source)
           raise 'SketchUp не загрузил компонент' unless definition
           SelectedExport.with_definition(model, definition, nil, operation_started: true) do |prepared, preparation|
             import_warnings = preparation[:warnings]
