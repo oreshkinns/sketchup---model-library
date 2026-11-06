@@ -19,6 +19,12 @@ module MafLibrary
       data.fetch('paths', {}).fetch(scope, @defaults.fetch(scope))
     end
 
+    def preview_worker_root
+      local = ENV['LOCALAPPDATA']
+      return File.join(local, 'MafLibrary', 'preview-worker') unless local.to_s.empty?
+      File.expand_path('../tmp/preview-worker', __dir__)
+    end
+
     def paths
       SCOPES.to_h { |scope| [scope, path(scope)] }
     end
@@ -186,3 +192,4 @@ module MafLibrary
     end
   end
 end
+
