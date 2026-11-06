@@ -294,7 +294,7 @@ module MafLibrary
             updated += 1
           else
             entry = {'id' => id, 'name' => File.basename(real, File.extname(real)), 'category' => category,
-                     'version' => 1, 'tags' => [], 'favorite' => false}
+                     'version' => 1, 'tags' => [], 'favorite' => false, 'preview_pending' => true}
             items << entry
             added += 1
           end
@@ -454,6 +454,7 @@ module MafLibrary
       FileUtils.mkdir_p(File.join(root, 'thumbnails'))
       filename = "#{SecureRandom.uuid}.#{ext}"
       path = File.join(root, 'thumbnails', filename)
+      old = thumbnail_path(id)
       committed = false
       begin
         File.open(path, 'wb') { |file| file.write(bytes); file.flush; file.fsync }
@@ -464,6 +465,12 @@ module MafLibrary
           entry['thumbnail_revision'] = SecureRandom.uuid
         end
         committed = true
+        begin
+          File.delete(old) if old && old != path && File.file?(old)
+        rescue SystemCallError
+          # Publication has committed; cleanup must never turn success into failure.
+          nil
+        end
         filename
       ensure
         File.delete(path) if !committed && File.file?(path)

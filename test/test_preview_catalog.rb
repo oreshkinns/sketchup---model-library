@@ -17,7 +17,7 @@ class PreviewCatalogTest < Minitest::Test
       target = catalog.preview_target(id, explicit: true)
       assert catalog.publish_generated_thumbnail(id, validated_result: result, expected_sha256: target[:source_sha256], expected_thumbnail_revision: target[:revision])
       refute_equal old, catalog.thumbnail_path(id)
-      assert File.file?(old)
+      refute File.file?(old)
       assert_equal 'generated', catalog.find(id)['thumbnail_provenance']['kind']
     end
   end
