@@ -818,33 +818,36 @@ module MafLibrary
     end
 
     def queue_preview(catalog, id, explicit: false)
-      return unless catalog.preview_target(id, explicit: explicit)
       scope = Settings::SCOPES.find { |name| @catalogs.catalog(name).equal?(catalog) }
       catalog.preview_scope = scope
       @preview_requests ||= {}
       key = [scope, id]
       return @preview_requests[key] if @preview_requests[key]
+      entry = catalog.find(id)
+      return unless entry && (explicit || (entry['preview_pending'] && !entry['thumbnail']))
       unless @preview_coordinator
         raise 'Фоновое превью доступно только в Windows' unless RUBY_PLATFORM =~ /mswin|mingw/
         process = PreviewProcess.new(worker_script: File.join(__dir__, 'preview_worker.rb'),
                                      startup_template: File.join(__dir__, 'assets', 'preview-startup.skp'))
         @preview_coordinator = PreviewCoordinator.new(process: process, root: @settings.preview_worker_root,
-          event_sink: lambda { |event|
-            event_key = [event[:scope], event[:id]]
-            if %w[queued running].include?(event[:state])
-              @preview_requests[event_key] = event[:request_id]
-            else
-              @preview_requests.delete(event_key)
-            end
-            push(preview_event: event)
-            refresh_catalog if event[:state] == 'succeeded'
-          })
+          event_sink: method(:preview_event))
         @preview_timer = UI.start_timer(0.25, true) { @preview_coordinator&.tick }
       end
       @preview_coordinator.enqueue(catalog: catalog, id: id, explicit: explicit)
     rescue StandardError, NotImplementedError => error
       push(preview_event: {scope: scope, id: id, request_id: "unavailable-#{id}", state: 'failed', error: error.message})
       nil
+    end
+
+    def preview_event(event)
+      event_key = [event[:scope], event[:id]]
+      if %w[queued running].include?(event[:state])
+        @preview_requests[event_key] = event[:request_id]
+      else
+        @preview_requests.delete(event_key)
+      end
+      push(preview_event: event)
+      refresh_catalog(nil) if event[:state] == 'succeeded'
     end
 
     def ensure_thumbnail(catalog, id)

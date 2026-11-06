@@ -1084,3 +1084,51 @@ class CatalogVersionTest
   end
 end
 
+
+class ControllerTest
+  def test_repeated_pending_addition_keeps_original_publication_revision
+    catalog = Class.new do
+      attr_accessor :preview_scope
+      attr_reader :revision
+      def initialize; @revision = 0; end
+      def find(_); {'preview_pending' => true}; end
+      def preview_target(*)
+        @revision += 1
+        {revision: @revision}
+      end
+      def publish(snapshot); snapshot[:revision] == @revision; end
+    end.new
+    controller = MafLibrary::Controller.allocate
+    controller.instance_variable_set(:@catalogs, Struct.new(:item) { def catalog(_); item; end }.new(catalog))
+    controller.instance_variable_set(:@preview_requests, {})
+    coordinator = Object.new
+    snapshot = nil
+    coordinator.define_singleton_method(:enqueue) do |catalog:, id:, explicit:|
+      snapshot = catalog.preview_target(id, explicit: explicit)
+      controller.instance_variable_get(:@preview_requests)[['personal', id]] = 'original'
+      'original'
+    end
+    controller.instance_variable_set(:@preview_coordinator, coordinator)
+    assert_equal 'original', controller.send(:queue_preview, catalog, 'new')
+    revision = catalog.revision
+    assert_equal 'original', controller.send(:queue_preview, catalog, 'new')
+    assert_equal revision, catalog.revision, 'repeated scan must not invalidate active publication'
+    assert catalog.publish(snapshot), 'original result must still publish'
+    assert_equal 1, revision, 'coordinator alone acquires target once'
+  end
+end
+
+class ControllerTest
+  def test_success_event_refreshes_without_turning_success_into_failure
+    events = []
+    refreshed = []
+    @controller.instance_variable_set(:@preview_requests, {['personal', 'new'] => 'request'})
+    @controller.define_singleton_method(:push) { |payload| events << payload }
+    @controller.define_singleton_method(:refresh_catalog) { |message| refreshed << message }
+    event = {scope: 'personal', id: 'new', request_id: 'request', state: 'succeeded'}
+    @controller.send(:preview_event, event)
+    assert_equal [{preview_event: event}], events
+    assert_equal [nil], refreshed
+    assert_empty @controller.instance_variable_get(:@preview_requests)
+  end
+end
