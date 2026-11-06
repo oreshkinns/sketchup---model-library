@@ -88,9 +88,9 @@ module MafLibrary
                'file_size_bytes' => File.size(destination), 'tags' => [], 'favorite' => false}
       entry['instance_export'] = true if instance_export == true
       items = entries
+      entry['preview_pending'] = true
       items << entry
       save(items)
-      generate_thumbnail(id)
       entry['import_warnings'] = import_warnings if import_warnings && !import_warnings.empty?
       entry
     rescue StandardError
@@ -167,9 +167,9 @@ module MafLibrary
           'recognition_fingerprint' => recognition_fingerprint)
       end
       items = entries
+      entry['preview_pending'] = true
       items << entry
       save(items)
-      generate_thumbnail(id, definition, temporary_definition: temporary_definition)
       entry
     rescue StandardError
       File.delete(destination) if destination && File.file?(destination)
@@ -355,24 +355,35 @@ module MafLibrary
       write_thumbnail(id, bytes, ext)
     end
 
+    # Rendering is owned by the controller coordinator; reads never render.
     def generate_thumbnail(id, definition = nil, temporary_definition: false)
-      entry = find(id)
-      return false unless entry
-      FileUtils.mkdir_p(File.join(root, 'thumbnails'))
-      path = File.join(root, 'thumbnails', "#{id}.png")
-      if definition && definition.respond_to?(:save_thumbnail)
-        saved = Thumbnail.save(definition, path, temporary_definition: temporary_definition)
-      elsif defined?(Sketchup) && Sketchup.respond_to?(:save_thumbnail)
-        saved = Sketchup.save_thumbnail(file_for(id), path)
-      end
-      if saved && File.file?(path)
-        update_entry(id) { |item| item['thumbnail'] = "#{id}.png" }
-        true
-      else
-        false
-      end
-    rescue StandardError
       false
+    end
+
+    def preview_target(id, explicit: false)
+      with_catalog_transaction do
+        entry = find(id)
+        return nil unless entry
+        return nil if !explicit && (entry['thumbnail'] || !entry['preview_pending'])
+        revision = SecureRandom.uuid
+        update_entry(id) { |item| item['thumbnail_revision'] = revision }
+        path = file_for(id)
+        {source_path: path, source_sha256: Digest::SHA256.file(path).hexdigest,
+         revision: revision, scope: @preview_scope || root}
+      end
+    end
+
+    attr_writer :preview_scope
+
+    def publish_generated_thumbnail(id, validated_result:, expected_sha256:, expected_thumbnail_revision:)
+      with_catalog_transaction do
+        entry = find(id)
+        return false unless entry && entry['thumbnail_revision'] == expected_thumbnail_revision
+        return false unless Digest::SHA256.file(file_for(id)).hexdigest == expected_sha256
+        publish_thumbnail_bytes(id, File.binread(validated_result.fetch(:png_path)), 'png',
+          validated_result.fetch(:provenance).merge('kind' => 'generated'))
+        true
+      end
     end
 
     private
@@ -435,14 +446,28 @@ module MafLibrary
     end
 
     def write_thumbnail(id, bytes, ext)
-      raise ArgumentError, 'Модель не найдена в каталоге' unless find(id)
+      publish_thumbnail_bytes(id, bytes, ext, {'kind' => 'custom'})
+    end
+
+    def publish_thumbnail_bytes(id, bytes, ext, provenance)
+      raise ArgumentError, 'Model not found' unless find(id)
       FileUtils.mkdir_p(File.join(root, 'thumbnails'))
-      old = thumbnail_path(id)
-      filename = "#{id}.#{ext}"
-      File.binwrite(File.join(root, 'thumbnails', filename), bytes)
-      update_entry(id) { |entry| entry['thumbnail'] = filename }
-      File.delete(old) if old && old != thumbnail_path(id) && File.file?(old)
-      filename
+      filename = "#{SecureRandom.uuid}.#{ext}"
+      path = File.join(root, 'thumbnails', filename)
+      committed = false
+      begin
+        File.open(path, 'wb') { |file| file.write(bytes); file.flush; file.fsync }
+        update_entry(id) do |entry|
+          entry.delete('preview_pending')
+          entry['thumbnail'] = filename
+          entry['thumbnail_provenance'] = provenance
+          entry['thumbnail_revision'] = SecureRandom.uuid
+        end
+        committed = true
+        filename
+      ensure
+        File.delete(path) if !committed && File.file?(path)
+      end
     end
 
     def update_entry(id)
