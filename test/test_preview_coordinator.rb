@@ -123,7 +123,37 @@ class PreviewCoordinatorTest < Minitest::Test
     refute_includes root,'catalog'
     assert root.end_with?('preview-worker')
   end
+  def test_late_readiness_cannot_reset_startup_deadline
+    @queue.enqueue(catalog:@catalog,id:'a'); @queue.tick
+    directory=Dir[File.join(@dir,'jobs','*')].first
+    request=JSON.parse(File.read(File.join(directory,'request.json')))
+    File.write(File.join(directory,'started.json'),JSON.generate(request.merge('state'=>'running')))
+    @time=60; @queue.tick
+    assert_equal 'failed',@events.last[:state]
+    assert_equal 1,@worker.stops
+  end
+  def test_late_result_cannot_bypass_render_deadline
+    @queue.enqueue(catalog:@catalog,id:'a'); @queue.tick
+    directory=Dir[File.join(@dir,'jobs','*')].first
+    request=JSON.parse(File.read(File.join(directory,'request.json')))
+    File.write(File.join(directory,'started.json'),JSON.generate(request.merge('state'=>'running')))
+    @time=1; @queue.tick
+    File.write(File.join(directory,'status.json'),'{}')
+    @catalog.define_singleton_method(:publish_generated_thumbnail) { |*, **| raise 'must not publish' }
+    @time=121
+    MafLibrary::PreviewProtocol.stub(:validate_result,{png_path:'validated'}) { @queue.tick }
+    assert_equal 'renderer timeout',@events.last[:error]
+    assert_equal 'failed',@events.last[:state]
+  end
+  def test_coalesced_targets_are_bounded
+    33.times { |i| @queue.enqueue(catalog:@catalog,id:i) }
+    assert_equal 32,@events.count{|e|e[:state]=='queued'}
+    assert_equal 'failed',@events.last[:state]
+    @queue.shutdown
+    assert_equal 33,@events.count{|e| %w[failed cancelled].include?(e[:state])}
+  end
 end
+
 
 
 

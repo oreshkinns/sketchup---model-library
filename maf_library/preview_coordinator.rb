@@ -20,6 +20,7 @@ module MafLibrary
       key = request.values_at('source_sha256', 'renderer_version', 'camera_version')
       existing = @jobs.find { |j| j[:key] == key }
       item = {catalog: catalog, id: id, snapshot: target.dup.freeze, request_id: identity}
+      raise 'preview queue full' if @jobs.sum { |job| job[:targets].length } >= 32
       if existing
         existing[:targets] << item
         emit(item, existing.equal?(@active) ? 'running' : 'queued')
@@ -48,6 +49,12 @@ module MafLibrary
       return if @closed
       if @active
         job = @active
+        deadline = job[:ready_at] ? job[:ready_at] + 120 : job[:started_at] + 60
+        if now >= deadline
+          finish(job, 'failed', 'renderer timeout')
+          launch unless @active || @jobs.empty?
+          return
+        end
         status = PreviewProtocol.owned_path(job[:directory], 'status.json')
         if @fs.file?(status)
           result = PreviewProtocol.validate_result(job[:request], job[:directory])
@@ -118,6 +125,7 @@ module MafLibrary
     end
   end
 end
+
 
 
 
