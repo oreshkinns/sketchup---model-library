@@ -1,3 +1,4 @@
+return if !ENV['MAF_LIBRARY_PREVIEW_WORKER'].to_s.empty?
 require 'sketchup.rb'
 require 'extensions.rb'
 

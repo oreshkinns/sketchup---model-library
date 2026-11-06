@@ -817,9 +817,9 @@ class ControllerTest < Minitest::Test
         def start_operation(*); raise 'Readonly thumbnail changed model history'; end
       end.new
       Sketchup.active_model = loaded
-      assert @controller.send(:ensure_thumbnail, catalog, entry['id'])
-      assert_equal [catalog.file_for(entry['id'])], extracted_paths
-      assert File.file?(catalog.thumbnail_path(entry['id']))
+      @controller.send(:ensure_thumbnail, catalog, entry['id'])
+      assert_empty extracted_paths
+      assert_nil catalog.thumbnail_path(entry['id'])
     end
   ensure
     Sketchup.active_model = original_model

@@ -1103,7 +1103,7 @@ class ControllerRecognitionTest < Minitest::Test
     assert_equal 'shared', other.get_attribute('MafLibrary', 'catalog_scope')
     assert_nil @definition.get_attribute('MafLibrary', 'catalog_id')
     assert_nil report
-    assert_empty UI.timers
+    assert UI.timers.values.any? { |timer| timer[0] == 0.25 && timer[1] }
   end
 
   def test_synchronous_placement_context_transaction_preserves_report

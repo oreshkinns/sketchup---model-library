@@ -1,3 +1,5 @@
+require_relative 'preview_coordinator'
+require_relative 'preview_process'
 require_relative 'definition_loader'
 require 'json'
 require 'digest'
@@ -370,6 +372,7 @@ module MafLibrary
       @dialog.add_action_callback('set_thumbnail') do |_context, id, data_url|
         safely { set_thumbnail(id.to_s, data_url.to_s) }
       end
+      @dialog.add_action_callback('cancel_preview') { |_context, request_id| safely { @preview_coordinator&.cancel(request_id.to_s) } }
       @dialog.add_action_callback('regenerate_thumbnail') { |_context, id| safely { regenerate_thumbnail(id.to_s) } }
       @dialog.add_action_callback('check_update') { |_context| safely { check_update } }
       @dialog.add_action_callback('install_update') { |_context| safely { install_update } }
@@ -701,6 +704,11 @@ module MafLibrary
     end
 
     def panel_closed
+      @preview_coordinator&.shutdown
+      @preview_coordinator = nil
+      @preview_requests = {}
+      UI.stop_timer(@preview_timer) if @preview_timer
+      @preview_timer = nil
       @panel_closed = true
       cancel_timers
       detach_model_observers
@@ -785,7 +793,9 @@ module MafLibrary
       entry = find_catalog_entry("#{source_scope}:#{raw_id}")
       path = source_scope == 'cloud' ? cloud.ensure_local(raw_id) : @catalogs.catalog(source_scope).file_for(raw_id)
       raise ArgumentError, 'Файл модели каталога отсутствует' unless path && File.file?(path)
-      @catalogs.catalog(destination_scope).copy_from(path, entry, category: category)
+      destination = @catalogs.catalog(destination_scope)
+      copied = destination.copy_from(path, entry, category: category)
+      queue_preview(destination, copied['id'])
       mark_report_stale
       refresh_catalog('Копия модели добавлена в библиотеку.')
     end
@@ -802,14 +812,44 @@ module MafLibrary
       catalog = @catalogs.catalog(scope)
       result = catalog.scan_inbox
       catalog.entries.each do |entry|
-        ensure_thumbnail(catalog, entry['id']) unless catalog.thumbnail_path(entry['id'])
+        queue_preview(catalog, entry['id']) if entry['preview_pending']
       end
       refresh_catalog("Папка проверена: добавлено #{result[:added]}, обновлено #{result[:updated]}.")
     end
 
+    def queue_preview(catalog, id, explicit: false)
+      return unless catalog.preview_target(id, explicit: explicit)
+      scope = Settings::SCOPES.find { |name| @catalogs.catalog(name).equal?(catalog) }
+      catalog.preview_scope = scope
+      @preview_requests ||= {}
+      key = [scope, id]
+      return @preview_requests[key] if @preview_requests[key]
+      unless @preview_coordinator
+        raise 'Фоновое превью доступно только в Windows' unless RUBY_PLATFORM =~ /mswin|mingw/
+        process = PreviewProcess.new(worker_script: File.join(__dir__, 'preview_worker.rb'),
+                                     startup_template: File.join(__dir__, 'assets', 'preview-startup.skp'))
+        @preview_coordinator = PreviewCoordinator.new(process: process, root: @settings.preview_worker_root,
+          event_sink: lambda { |event|
+            event_key = [event[:scope], event[:id]]
+            if %w[queued running].include?(event[:state])
+              @preview_requests[event_key] = event[:request_id]
+            else
+              @preview_requests.delete(event_key)
+            end
+            push(preview_event: event)
+            refresh_catalog if event[:state] == 'succeeded'
+          })
+        @preview_timer = UI.start_timer(0.25, true) { @preview_coordinator&.tick }
+      end
+      @preview_coordinator.enqueue(catalog: catalog, id: id, explicit: explicit)
+    rescue StandardError, NotImplementedError => error
+      push(preview_event: {scope: scope, id: id, request_id: "unavailable-#{id}", state: 'failed', error: error.message})
+      nil
+    end
+
     def ensure_thumbnail(catalog, id)
       return true if catalog.thumbnail_path(id)
-      catalog.generate_thumbnail(id)
+      queue_preview(catalog, id)
     rescue StandardError
       false
     end
@@ -832,7 +872,7 @@ module MafLibrary
       catalog = @catalogs.catalog(scope)
       result = PackTransfer.import(catalog, folder)
       catalog.entries.each do |entry|
-        ensure_thumbnail(catalog, entry['id']) unless catalog.thumbnail_path(entry['id'])
+        queue_preview(catalog, entry['id']) if entry['preview_pending']
       end
       refresh_catalog("Импортировано: #{result[:imported]}, пропущено совпадений: #{result[:skipped]}.")
     end
@@ -1035,6 +1075,7 @@ module MafLibrary
     def add_rows_to_library(ids, scope)
       raise 'Облачная библиотека доступна только для чтения' unless Settings::SCOPES.include?(scope)
       count = actions_for(ids, catalogs: recognition_catalogs).add_to_library(ids, scope)
+      @catalogs.catalog(scope).entries.each { |entry| queue_preview(@catalogs.catalog(scope), entry['id']) if entry['preview_pending'] }
       invalidate_report("В #{scope == 'shared' ? 'общую' : 'личную'} библиотеку добавлено моделей: #{count}.", catalog_changed: true)
     end
 
@@ -1376,8 +1417,7 @@ module MafLibrary
       raise 'Для облачной модели изображение меняют в исходном каталоге' if entry['scope'] == 'cloud'
       catalog = @catalogs.catalog(entry['scope'])
       id = entry['id']
-      raise 'SketchUp не создал миниатюру компонента' unless catalog.generate_thumbnail(id) || ensure_thumbnail(catalog, id)
-      refresh_catalog('Миниатюра модели создана SketchUp.')
+      queue_preview(catalog, id, explicit: true)
     end
 
     def import_model(scope)
@@ -1423,6 +1463,7 @@ module MafLibrary
           definition: definition, entity: entity, scope: scope, name: name, category: category, copy_existing: copy_existing)
       end
       invalidate_report(nil, catalog_changed: true) if @dialog && @dialog.visible? && !@panel_closed
+      queue_preview(@catalogs.catalog(scope), entry['id'])
       push(open_catalog_id: entry['id'], open_catalog_scope: scope,
         message: (["Модель «#{entry['name']}» в библиотеке."] + Array(entry['export_warnings'])).join(' '), recognition_warnings: entry['recognition_warnings'])
       entry
@@ -1506,7 +1547,6 @@ module MafLibrary
         definition = load_catalog_definition(entry)
         if entry['scope'] != 'cloud'
           catalog = @catalogs.catalog(entry['scope'])
-          catalog.generate_thumbnail(id) unless catalog.thumbnail_path(id)
         end
         current.commit_operation
       rescue StandardError
@@ -1546,7 +1586,6 @@ module MafLibrary
       definition = load_catalog_definition(entry)
       if entry['scope'] != 'cloud'
         catalog = @catalogs.catalog(entry['scope'])
-        catalog.generate_thumbnail(id) unless catalog.thumbnail_path(id)
       end
       tool = ArrayTool.new(model, definition, mode, spacing_mm, surface_options) do |count|
         entry['scope'] == 'cloud' ? @settings.mark_cloud_used(id) : @catalogs.catalog(entry['scope']).mark_used(id)

@@ -45,3 +45,31 @@ test('offline React views receive SketchUp reports and render subsequent updates
     await browser.close();
   }
 });
+
+test('preview jobs preserve images, scope identity, cancellation and retry', async () => {
+  const browser = await chromium.launch({headless:true});
+  try {
+    const page = await browser.newPage();
+    await page.addInitScript(() => { window.calls=[]; window.sketchup=new Proxy({}, {get:(_,name)=>(...args)=>window.calls.push([name,...args])}); });
+    await page.goto(pathToFileURL(path.join(__dirname,'../preview.html')).href);
+    await page.waitForFunction(() => window.MAF);
+    await page.evaluate(() => MAF.receive({catalog_update:{catalog:[{id:'same',scope:'personal',name:'Bench',category:'Other',thumbnail:'data:image/png;base64,old'}]}}));
+    const card=page.locator('[data-card-key="personal:same"]');
+    await card.waitFor();
+    const emit=job=>page.evaluate(job=>MAF.receive({preview_event:job}),job);
+    await emit({scope:'personal',id:'same',request_id:'one',state:'queued'});
+    await page.waitForFunction(() => document.querySelector('[data-thumb-auto]').textContent.includes('Отменить'));
+    await card.locator('[data-thumb-auto]').evaluate(button => button.click());
+    assert.deepEqual(await page.evaluate(()=>calls.at(-1)),['cancel_preview','one']);
+    await emit({scope:'personal',id:'same',request_id:'two',state:'queued'});
+    await emit({scope:'personal',id:'same',request_id:'one',state:'failed',error:'stale'});
+    assert.match(await card.textContent(),/Отменить превью/);
+    await emit({scope:'shared',id:'same',request_id:'other',state:'failed',error:'wrong scope'});
+    assert.match(await card.textContent(),/Отменить превью/);
+    await emit({scope:'personal',id:'same',request_id:'two',state:'failed',error:'Renderer failed'});
+    assert.match(await card.textContent(),/Повторить превью/);
+    assert.match(await card.textContent(),/Renderer failed/);
+    await card.locator('[data-thumb-auto]').evaluate(button => button.click());
+    assert.deepEqual(await page.evaluate(()=>calls.at(-1)),['regenerate_thumbnail','personal:same']);
+  } finally { await browser.close(); }
+});

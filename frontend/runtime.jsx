@@ -12,6 +12,7 @@ import React from "react";
 import { mountView, viewList } from "./viewHost.jsx";
 export function initializeRuntime() {
   const $ = (id) => document.getElementById(id);
+  const previewJobs = new Map();
   const demo = !window.sketchup;
   const clone = (value) => JSON.parse(JSON.stringify(value));
   // SketchUp 2021.0 embeds CEF 64: no optional chaining, ?? or Array.flatMap.
@@ -1054,7 +1055,7 @@ export function initializeRuntime() {
                   valueOr={valueOr}
                   warningLabel={warningLabel}
                   warnings={warnings}
-                  x={x}
+                  x={{...x, previewJob: previewJobs.get(`${x.scope}:${x.id}`)}}
                   key={x.scope + ":" + x.id}
                 />
               );
@@ -2967,7 +2968,9 @@ export function initializeRuntime() {
     }
     const auto = event.target.closest("[data-thumb-auto]");
     if (auto) {
-      call("regenerate_thumbnail", catalogIdentity(auto, auto.dataset.thumbAuto));
+      const job = previewJobs.get(catalogIdentity(auto, auto.dataset.thumbAuto));
+      if (job && ["queued", "running"].includes(job.state)) call("cancel_preview", job.request_id);
+      else call("regenerate_thumbnail", catalogIdentity(auto, auto.dataset.thumbAuto));
       return;
     }
     const file = event.target.closest("[data-thumb-file]");
@@ -3391,6 +3394,12 @@ export function initializeRuntime() {
   });
   window.MAF = {
     receive(payload) {
+      if (payload.preview_event) {
+        const job = payload.preview_event, key = `${job.scope}:${job.id}`, old = previewJobs.get(key);
+        if (!old || old.request_id === job.request_id || job.state === "queued" || job.request_id.startsWith("unavailable-")) {
+          previewJobs.set(key, job); renderCatalog();
+        }
+      }
       if (Object.prototype.hasOwnProperty.call(payload, "replacement_result")) {
         $("replacement-result").hidden = !payload.replacement_result;
         $("replacement-message").textContent = payload.replacement_result

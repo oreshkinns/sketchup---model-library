@@ -281,6 +281,7 @@ export function CatalogCard({
       </div>
       <div className={"catalog-copy"}>
         <h3>{x.name}</h3>
+              {x.previewJob && <p role="status">{({queued: "Превью в очереди", running: "Создание превью", failed: x.previewJob.error || "Ошибка превью", cancelled: "Превью отменено"})[x.previewJob.state]}</p>}
         <div className={"scope-tag"}>
           {x.category || "Другое"}
           {" · "}
@@ -363,7 +364,7 @@ export function CatalogCard({
                   {"Теги"}
                 </button>
                 <button className={"button small"} data-thumb-auto={x.id}>
-                  {"Снимок"}
+                  {x.previewJob && ["queued", "running"].includes(x.previewJob.state) ? "Отменить превью" : x.previewJob?.state === "failed" ? "Повторить превью" : "Создать превью"}
                 </button>
                 <button className={"button small"} data-thumb-file={x.id}>
                   {"Файл"}
