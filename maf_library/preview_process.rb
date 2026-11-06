@@ -23,6 +23,9 @@ module MafLibrary
       @owned[handle.object_id] = handle
       handle
     end
+    def retry_cleanup
+      @native.retry_cleanup
+    end
     def verify!(handle, token: handle.token)
       unless @owned[handle.object_id].equal?(handle) && token == handle.token && @native.creation_time(handle.process) == handle.creation_time
         raise OwnershipError, 'renderer ownership mismatch'
@@ -78,6 +81,7 @@ module MafLibrary
         '"' + value.gsub(/(\\*)"/) { $1 * 2 + '\\"' }.sub(/(\\+)\z/) { $1 * 2 } + '"'
       end
       def launch(executable:, arguments:, token:, request_dir:)
+        retry_cleanup
         name = 'MafPreview-' + SecureRandom.hex(16)
         desktop = @api.CreateDesktopW(wide(name), 0, 0, 0, 0x10000000, 0)
         raise 'CreateDesktopW failed' if desktop.to_i == 0
@@ -96,8 +100,7 @@ module MafLibrary
           process, thread = pi[0,16].unpack('Q2'); @api.CloseHandle(thread)
           {pid: pi[16,4].unpack('L')[0], process: process, desktop: desktop, creation_time: creation_time(process)}
         rescue Exception
-          @api.TerminateProcess(process, 1) if process
-          close(process, desktop)
+          process ? cleanup_failed_launch(process, desktop) : close(nil, desktop)
           raise
         end
       end
@@ -106,7 +109,31 @@ module MafLibrary
         raise OwnershipError, 'GetProcessTimes failed' if @api.GetProcessTimes(process, *buffers) == 0
         buffers.first.unpack('Q').first
       end
-      def alive?(process); @api.WaitForSingleObject(process, 0) == 258; end
+      def alive?(process)
+        case @api.WaitForSingleObject(process, 0)
+        when 258 then true
+        when 0 then false
+        else raise OwnershipError, 'WaitForSingleObject failed'
+        end
+      end
+      def pending_cleanup
+        (@pending_cleanup ||= []).map(&:dup)
+      end
+      def cleanup_failed_launch(process, desktop)
+        pair = [process, desktop]
+        @pending_cleanup ||= []
+        @pending_cleanup << pair unless @pending_cleanup.include?(pair)
+        begin
+          terminate(process) if alive?(process)
+          close(process, desktop)
+          @pending_cleanup.delete(pair)
+        rescue StandardError => error
+          raise OwnershipError, "launch cleanup pending: #{error.message}; call retry_cleanup"
+        end
+      end
+      def retry_cleanup
+        pending_cleanup.each { |process, desktop| cleanup_failed_launch(process, desktop) }
+      end
       def terminate(process)
         raise 'TerminateProcess failed' if @api.TerminateProcess(process, 1) == 0
         raise 'renderer termination pending' unless @api.WaitForSingleObject(process, 5000) == 0
@@ -118,4 +145,6 @@ module MafLibrary
     end
   end
 end
+
+
 

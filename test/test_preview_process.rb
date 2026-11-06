@@ -56,3 +56,47 @@ class PreviewProcessTest
   end
 end
 
+
+class PreviewProcessTest
+  class Api
+    attr_accessor :wait, :termination
+    attr_reader :closed
+    def initialize; @wait=0xffffffff; @termination=0; @closed=[]; end
+    def WaitForSingleObject(*); @wait; end
+    def TerminateProcess(*); @termination; end
+    def CloseHandle(h); @closed << h; end
+    def CloseDesktop(h); @closed << h; end
+  end
+  def wrapper
+    api=Api.new; native=MafLibrary::PreviewProcess::Windows.allocate
+    native.instance_variable_set(:@api,api); [native,api]
+  end
+  def test_wait_failed_is_error
+    native,api=wrapper
+    assert_raises(MafLibrary::PreviewProcess::OwnershipError){native.alive?(9)}
+    assert_empty api.closed
+  end
+  def test_failed_launch_cleanup_retains_retryable_handles
+    native,api=wrapper
+    assert_raises(MafLibrary::PreviewProcess::OwnershipError){native.cleanup_failed_launch(9,10)}
+    assert_empty api.closed
+    assert_equal [[9,10]],native.pending_cleanup
+    api.termination=1; api.wait=0
+    native.retry_cleanup
+    assert_equal [9,10],api.closed
+    assert_empty native.pending_cleanup
+  end
+end
+
+class PreviewProcessTest
+  def test_cleanup_timeout_retains_handles_then_retry_reaps
+    native,api=wrapper
+    api.wait=258; api.termination=1
+    assert_raises(MafLibrary::PreviewProcess::OwnershipError){native.cleanup_failed_launch(9,10)}
+    assert_empty api.closed
+    assert_equal [[9,10]],native.pending_cleanup
+    api.wait=0; native.retry_cleanup
+    assert_empty native.pending_cleanup
+    assert_equal [9,10],api.closed
+  end
+end
