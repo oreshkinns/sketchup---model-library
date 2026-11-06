@@ -28,8 +28,6 @@ module MafLibrary
           view=model.active_view
           camera=Sketchup::Camera.new(data[:eye],data[:target],[0,0,1],false)
           camera.aspect_ratio=1.0; camera.height=data[:height]; view.camera=camera
-          model.rendering_options['DrawGround']=false
-          model.rendering_options['DrawSky']=false
           view.refresh
           temp=PreviewProtocol.owned_path(root,'preview.tmp.png')
           raise PreviewProtocol::Error, 'image export failed' unless view.write_image(filename: temp,width:512,height:512,antialias:true,transparent:false)

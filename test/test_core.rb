@@ -270,6 +270,14 @@ class SettingsFavoritesTest < Minitest::Test
 end
 
 class PackTransferTest < Minitest::Test
+  def setup
+    Sketchup.active_model = FakeModel.new([])
+  end
+
+  def teardown
+    Sketchup.active_model = FakeModel.new([])
+  end
+
   def test_export_and_import_keep_metadata_and_skip_duplicate_content
     Dir.mktmpdir do |dir|
       source = File.join(dir, 'bench.skp')
@@ -463,6 +471,14 @@ class AnalyzerTest < Minitest::Test
 end
 
 class ProjectActionsTest < Minitest::Test
+  def setup
+    Sketchup.active_model = FakeModel.new([])
+  end
+
+  def teardown
+    Sketchup.active_model = FakeModel.new([])
+  end
+
   def test_rename_matching_components_or_merge_all
     one = FakeDefinition.new('Окно A', [FakeEdge.new])
     two = FakeDefinition.new('Окно B', [FakeEdge.new])
@@ -1067,3 +1083,4 @@ class CatalogVersionTest
     assert_equal 'saved:Before', File.binread(@path)
   end
 end
+
