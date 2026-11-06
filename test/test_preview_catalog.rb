@@ -22,3 +22,27 @@ class PreviewCatalogTest < Minitest::Test
     end
   end
 end
+class PreviewCatalogTest
+  def test_only_known_generated_renderer_is_automatically_migrated_and_hash_is_checked
+    Dir.mktmpdir do |dir|
+      source = File.join(dir, 'source.skp'); File.write(source, 'model')
+      catalog = MafLibrary::Catalog.new(File.join(dir, 'catalog'))
+      id = catalog.import(source, name: 'A', category: 'X')['id']
+      hash = Digest::SHA256.file(catalog.file_for(id)).hexdigest
+      catalog.send(:update_entry, id) do |entry|
+        entry.delete('preview_pending')
+        entry['thumbnail'] = 'old.png'
+        entry['thumbnail_provenance'] = {'kind'=>'generated','renderer_version'=>'background-axo-1','source_sha256'=>hash}
+      end
+      refute_nil catalog.preview_target(id), 'known generated v1 can migrate'
+      catalog.send(:update_entry, id) { |entry| entry['thumbnail_provenance']['renderer_version'] = MafLibrary::PreviewProtocol::RENDERER_VERSION }
+      assert_nil catalog.preview_target(id), 'current renderer never requeues'
+      catalog.send(:update_entry, id) { |entry| entry['thumbnail_provenance']['renderer_version'] = 'unknown' }
+      assert_nil catalog.preview_target(id)
+      catalog.send(:update_entry, id) { |entry| entry['thumbnail_provenance'].merge!('kind'=>'custom','renderer_version'=>'background-axo-1') }
+      assert_nil catalog.preview_target(id)
+      catalog.send(:update_entry, id) { |entry| entry['thumbnail_provenance'].merge!('kind'=>'generated','source_sha256'=>'0'*64) }
+      assert_nil catalog.preview_target(id), 'changed source cannot silently migrate'
+    end
+  end
+end

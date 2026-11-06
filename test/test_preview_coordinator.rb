@@ -157,3 +157,75 @@ end
 
 
 
+class PreviewCoordinatorTest
+  def test_session_capacity_is_observable
+    assert @queue.capacity?
+    32.times { |i| @queue.enqueue(catalog:@catalog,id:i) }
+    refute @queue.capacity?
+  end
+end
+class PreviewCoordinatorTest
+  class SessionWorker < Worker
+    attr_reader :dispatches
+    def initialize; super; @dispatches=[]; end
+    def dispatch(handle, request_dir:); @dispatches << [handle,request_dir]; end
+  end
+  def test_success_reuses_session_and_idle_shutdown
+    worker=SessionWorker.new
+    queue=MafLibrary::PreviewCoordinator.new(process:worker,root:File.join(@dir,'session'),clock:-> {@time})
+    @catalog.define_singleton_method(:publish_generated_thumbnail) { |*, **| true }
+    queue.enqueue(catalog:@catalog,id:'a'); queue.tick
+    first=Dir[File.join(@dir,'session','request-*')].first
+    File.write(File.join(first,'status.json'),'{}')
+    MafLibrary::PreviewProtocol.stub(:validate_result,{png_path:'validated'}) { queue.tick }
+    assert_equal 0,worker.stops
+    queue.enqueue(catalog:@catalog,id:'b'); queue.tick
+    assert_equal 1,worker.count
+    assert_equal 1,worker.dispatches.length
+    second=Dir[File.join(@dir,'session','request-*')].first
+    File.write(File.join(second,'status.json'),'{}')
+    MafLibrary::PreviewProtocol.stub(:validate_result,{png_path:'validated'}) { queue.tick }
+    @time=16; queue.tick
+    assert_equal 1,worker.stops
+    queue.shutdown
+  end
+end
+class PreviewCoordinatorTest
+  def test_failed_session_is_replaced_before_next_job
+    worker=SessionWorker.new
+    queue=MafLibrary::PreviewCoordinator.new(process:worker,root:File.join(@dir,'restart'),clock:-> {@time})
+    queue.enqueue(catalog:@catalog,id:'a'); queue.tick
+    @time=61; queue.tick
+    queue.enqueue(catalog:@catalog,id:'b'); queue.tick
+    assert_equal 2,worker.count
+    assert_equal 1,worker.stops
+    queue.shutdown
+  end
+  def test_idle_crashed_session_is_restarted
+    worker=SessionWorker.new
+    queue=MafLibrary::PreviewCoordinator.new(process:worker,root:File.join(@dir,'idle-crash'),clock:-> {@time})
+    @catalog.define_singleton_method(:publish_generated_thumbnail) { |*, **| true }
+    queue.enqueue(catalog:@catalog,id:'a'); queue.tick
+    dir=Dir[File.join(@dir,'idle-crash','request-*')].first
+    File.write(File.join(dir,'status.json'),'{}')
+    MafLibrary::PreviewProtocol.stub(:validate_result,{png_path:'validated'}) { queue.tick }
+    def worker.alive?(_); false; end
+    queue.enqueue(catalog:@catalog,id:'b'); queue.tick
+    assert_equal 2,worker.count
+    queue.shutdown
+  end
+end
+class PreviewCoordinatorTest
+  def test_cancelling_active_session_restarts_next_job
+    worker=SessionWorker.new
+    queue=MafLibrary::PreviewCoordinator.new(process:worker,root:File.join(@dir,'cancel-restart'),clock:-> {@time})
+    first=queue.enqueue(catalog:@catalog,id:'same')
+    other=File.join(@dir,'different.skp');File.write(other,'different')
+    second=Catalog.new(other);second.scope='shared'
+    queue.enqueue(catalog:second,id:'same');queue.tick
+    queue.cancel(first);queue.tick
+    assert_equal 2,worker.count
+    assert_equal 1,worker.stops
+    queue.shutdown
+  end
+end

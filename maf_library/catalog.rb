@@ -10,6 +10,7 @@ require_relative 'metadata'
 require_relative 'definition_signature'
 require_relative 'selected_export'
 require_relative 'thumbnail'
+require_relative 'preview_protocol'
 
 module MafLibrary
   class Catalog
@@ -360,11 +361,26 @@ module MafLibrary
       false
     end
 
+    def self.automatic_preview_needed?(entry)
+      return false unless entry
+      provenance = entry['thumbnail_provenance'] || {}
+      return false if provenance['kind'] == 'custom'
+      return true if entry['preview_pending'] && !entry['thumbnail']
+      provenance['kind'] == 'generated' &&
+        provenance['renderer_version'] == 'background-axo-1' &&
+        provenance['renderer_version'] != PreviewProtocol::RENDERER_VERSION
+    end
+
     def preview_target(id, explicit: false)
       with_catalog_transaction do
         entry = find(id)
         return nil unless entry
-        return nil if !explicit && (entry['thumbnail'] || !entry['preview_pending'])
+        return nil unless explicit || self.class.automatic_preview_needed?(entry)
+        path = file_for(id)
+        provenance = entry['thumbnail_provenance'] || {}
+        if !explicit && entry['thumbnail']
+          return nil unless provenance['source_sha256'] == Digest::SHA256.file(path).hexdigest
+        end
         revision = SecureRandom.uuid
         update_entry(id) { |item| item['thumbnail_revision'] = revision }
         path = file_for(id)

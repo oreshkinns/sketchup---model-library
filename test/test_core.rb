@@ -1103,6 +1103,8 @@ class ControllerTest
     controller.instance_variable_set(:@preview_requests, {})
     coordinator = Object.new
     snapshot = nil
+    coordinator.define_singleton_method(:capacity?) { true }
+    coordinator.define_singleton_method(:tick) {}
     coordinator.define_singleton_method(:enqueue) do |catalog:, id:, explicit:|
       snapshot = catalog.preview_target(id, explicit: explicit)
       controller.instance_variable_get(:@preview_requests)[['personal', id]] = 'original'
@@ -1125,10 +1127,14 @@ class ControllerTest
     @controller.instance_variable_set(:@preview_requests, {['personal', 'new'] => 'request'})
     @controller.define_singleton_method(:push) { |payload| events << payload }
     @controller.define_singleton_method(:refresh_catalog) { |message| refreshed << message }
+    catalog = Object.new
+    catalog.define_singleton_method(:find) { |_| {'id' => 'new'} }
+    @controller.instance_variable_set(:@catalogs, Struct.new(:item) { def catalog(_); item; end }.new(catalog))
+    @controller.define_singleton_method(:catalog_card) { |entry| entry.merge('thumbnail' => 'png') }
     event = {scope: 'personal', id: 'new', request_id: 'request', state: 'succeeded'}
     @controller.send(:preview_event, event)
-    assert_equal [{preview_event: event}], events
-    assert_equal [nil], refreshed
+    assert_equal [{preview_event: event, preview_card: {'id' => 'new', 'scope' => 'personal', 'thumbnail' => 'png'}}], events
+    assert_empty refreshed
     assert_empty @controller.instance_variable_get(:@preview_requests)
   end
 end
@@ -1140,6 +1146,9 @@ class ControllerTest
       published = []; events = []; refreshed = []
       catalog = Object.new
       catalog.define_singleton_method(:preview_target) { |id, explicit:| {source_path: path, source_sha256: Digest::SHA256.file(path).hexdigest, revision: 1, scope: 'personal'} }
+      catalog.define_singleton_method(:find) { |_| {'id' => 'new'} }
+      @controller.instance_variable_set(:@catalogs, Struct.new(:item) { def catalog(_); item; end }.new(catalog))
+      @controller.define_singleton_method(:catalog_card) { |entry| entry }
       catalog.define_singleton_method(:publish_generated_thumbnail) { |*args, **options| published << options; true }
       worker = Object.new
       worker.define_singleton_method(:start) { |**| Object.new }
@@ -1156,7 +1165,34 @@ class ControllerTest
       MafLibrary::PreviewProtocol.stub(:validate_result, {png_path: 'validated', provenance: {}}) { queue.tick }
       assert_equal 1, published.length
       assert_equal ['queued', 'running', 'succeeded'], events.map { |event| event[:state] }
-      assert_equal [nil], refreshed
+      assert_empty refreshed
     end
+  end
+end
+class ControllerTest
+  def test_pending_refill_processes_more_than_queue_capacity_without_retrying_failed_targets
+    entries = 70.times.map { |i| {'id' => i.to_s, 'scope' => 'personal', 'preview_pending' => true} }
+    catalog = Object.new
+    catalog.define_singleton_method(:find) { |id| entries.find { |e| e['id'] == id } }
+    catalog.define_singleton_method(:preview_scope=) { |_| }
+    catalogs = Struct.new(:item, :entries) { def catalog(_); item; end }.new(catalog, entries)
+    @controller.instance_variable_set(:@catalogs, catalogs)
+    @controller.instance_variable_set(:@preview_requests, {})
+    queue = Object.new
+    active = []; processed = []
+    queue.define_singleton_method(:capacity?) { active.length < 32 }
+    queue.define_singleton_method(:tick) {}
+    queue.define_singleton_method(:enqueue) do |catalog:, id:, explicit:|
+      active << id; processed << id; id
+    end
+    @controller.instance_variable_set(:@preview_coordinator, queue)
+    3.times do
+      @controller.send(:refill_pending_previews)
+      active.clear
+    end
+    assert_equal 70, processed.length
+    assert_equal 70, processed.uniq.length
+    @controller.send(:refill_pending_previews)
+    assert_equal 70, processed.length
   end
 end

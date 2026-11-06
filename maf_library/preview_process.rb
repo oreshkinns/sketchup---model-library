@@ -1,5 +1,7 @@
 require 'fileutils'
 require 'securerandom'
+require 'tmpdir'
+require_relative 'preview_protocol'
 module MafLibrary
   class PreviewProcess
     class OwnershipError < StandardError; end
@@ -13,15 +15,27 @@ module MafLibrary
     def start(request_dir:, token:)
       raise ArgumentError, 'empty token' if token.to_s.empty?
       directory = File.realpath(request_dir)
-      startup = File.join(directory, 'startup.skp')
-      raise ArgumentError, 'startup template must be separate' if File.expand_path(@startup_template) == startup
+      session = Dir.mktmpdir('session-', File.dirname(directory))
+      startup = File.join(session, 'startup.skp')
       FileUtils.cp(@startup_template, startup)
-      script = File.join(directory, 'bootstrap.rb')
-      File.write(script, "require 'json'\nrequest = JSON.parse(File.read(File.join(__dir__, 'request.json')))\nrequire #{@worker_script.dump}\nMafLibrary::PreviewWorker.run(request, __dir__)\n")
-      data = @native.launch(executable: @executable, arguments: [startup, '-RubyStartup', script], token: token, request_dir: directory)
-      handle = Handle.new(data[:pid], data[:creation_time], token.dup.freeze, data[:process], data[:desktop]).freeze
+      script = File.join(session, 'bootstrap.rb')
+      File.write(script, "require 'json'\nrequire #{@worker_script.dump}\nMafLibrary::PreviewWorker.run_session(__dir__)\n")
+      session_token = SecureRandom.hex(32)
+      PreviewProtocol.atomic_json(session, 'command.json', {'directory'=>File.basename(directory), 'token'=>session_token})
+      data = @native.launch(executable: @executable, arguments: [startup, '-RubyStartup', script], token: session_token, request_dir: session)
+      handle = Handle.new(data[:pid], data[:creation_time], session_token.dup.freeze, data[:process], data[:desktop]).freeze
+      (@sessions ||= {})[handle.object_id] = File.realpath(session)
       @owned[handle.object_id] = handle
       handle
+    end
+    def dispatch(handle, request_dir:)
+      verify!(handle)
+      session = @sessions.fetch(handle.object_id)
+      directory = File.realpath(request_dir)
+      unless File.dirname(directory) == File.dirname(session) && File.basename(directory).match?(/\Arequest-[A-Za-z0-9_-]+\z/) && !File.symlink?(request_dir)
+        raise OwnershipError, 'request outside owned root'
+      end
+      PreviewProtocol.atomic_json(session, 'command.json', {'directory'=>File.basename(directory), 'token'=>handle.token})
     end
     def retry_cleanup
       @native.retry_cleanup
@@ -48,6 +62,8 @@ module MafLibrary
     def release(handle)
       @native.close(handle.process, handle.desktop)
       @owned.delete(handle.object_id)
+      session = @sessions.delete(handle.object_id) if @sessions
+      FileUtils.remove_entry(session) if session && File.directory?(session) && !File.symlink?(session)
     end
     class Windows
       def initialize

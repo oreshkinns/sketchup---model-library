@@ -12,6 +12,9 @@ module MafLibrary
       FileUtils.mkdir_p(@root)
       @root = File.realpath(@root)
     end
+    def capacity?
+      @jobs.sum { |job| job[:targets].length } < 32 && !@closed
+    end
     def enqueue(catalog:, id:, explicit: false)
       identity = SecureRandom.uuid
       target = catalog.preview_target(id, explicit: explicit)
@@ -47,6 +50,9 @@ module MafLibrary
     end
     def tick
       return if @closed
+      if @session && @jobs.empty? && now - @idle_at >= 15
+        @process.stop(@session); @session = nil
+      end
       if @active
         job = @active
         deadline = job[:ready_at] ? job[:ready_at] + 120 : job[:started_at] + 60
@@ -58,7 +64,11 @@ module MafLibrary
         status = PreviewProtocol.owned_path(job[:directory], 'status.json')
         if @fs.file?(status)
           result = PreviewProtocol.validate_result(job[:request], job[:directory])
-          stop(job)
+          if @process.respond_to?(:dispatch)
+            @session = job[:handle]; job[:handle] = nil; @idle_at = now
+          else
+            stop(job)
+          end
           job[:targets].each do |target|
             s = target[:snapshot]
             begin
@@ -90,6 +100,8 @@ module MafLibrary
     def shutdown
       @closed = true
       @jobs.dup.each { |job| finish(job, 'cancelled') }
+      @process.stop(@session) if @session
+      @session = nil
       @process.retry_cleanup
     end
     private
@@ -105,7 +117,13 @@ module MafLibrary
       job[:owned_directory] = File.realpath(job[:directory])
       PreviewProtocol.atomic_json(job[:directory], 'request.json', job[:request])
       job[:started_at] = now
-      job[:handle] = @process.start(request_dir: job[:directory], token: job[:request]['token'])
+      @session = nil if @session && !@process.alive?(@session)
+      if @session
+        job[:handle] = @session; @session = nil
+        @process.dispatch(job[:handle], request_dir: job[:directory])
+      else
+        job[:handle] = @process.start(request_dir: job[:directory], token: job[:request]['token'])
+      end
       job[:targets].each { |t| emit(t, 'running') }
     end
     def stop(job)

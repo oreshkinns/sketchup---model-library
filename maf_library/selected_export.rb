@@ -35,7 +35,7 @@ module MafLibrary
       result.map { |n| n.round(12) }
     end
 
-    def self.for_path(path)
+    def self.for_path(path, preserve_orientation: true)
       combined = IDENTITY.dup
       path.each do |entity|
         next unless entity.respond_to?(:transformation)
@@ -45,12 +45,19 @@ module MafLibrary
           (0...4).sum { |k| combined[k * 4 + row] * matrix[column * 4 + k] }
         end
       end
-      canonical(combined)
+      stretch = canonical(combined) # Validate even when retaining world orientation.
+      return stretch unless preserve_orientation
+      # Keep the visible world up, pitch, roll, mirror and shear. The footprint
+      # pass is disabled for selected instances to preserve their visible pose.
+      result = combined.map { |value| value.to_f / combined[15] }
+      result[12, 3] = [0, 0, 0]
+      return nil if result.zip(IDENTITY).all? { |actual, expected| (actual - expected).abs < EPSILON }
+      result
     end
 
     def self.scaled_paths?(reference)
       reference.fetch(:refs, {}).each_value.any? do |ref|
-        Array(ref[:paths]).any? { |path| for_path(path) }
+        Array(ref[:paths]).any? { |path| for_path(path, preserve_orientation: false) }
       end
     end
 
@@ -62,7 +69,7 @@ module MafLibrary
           next unless entity.is_a?(Sketchup::ComponentInstance) || entity.is_a?(Sketchup::Group)
           child = entity.definition
           path = parents + [entity]
-          return true if child == definition && for_path(path)
+          return true if child == definition && for_path(path, preserve_orientation: false)
           next if ancestors.include?(child.object_id)
           pending << [child.entities, path, ancestors + [child.object_id]]
         end
@@ -136,8 +143,9 @@ module MafLibrary
       near.min_by { |item| [item[1].abs, item[1]] }[1]
     end
 
-    def self.with_definition(model, definition, transform, operation_started: false)
+    def self.with_definition(model, definition, transform, operation_started: false, preserve_orientation: false)
       angle = footprint_angle(footprint_points(definition, transform)) if definition.respond_to?(:bounds)
+      angle = 0.0 if preserve_orientation
       warnings = definition.respond_to?(:bounds) && angle.nil? ? [FRAME_WARNING] : []
       minimum = definition.bounds.min.to_a if definition.respond_to?(:bounds)
       frame_change = angle && angle.abs > EPSILON || minimum && minimum.any? { |v| v.abs > EPSILON }

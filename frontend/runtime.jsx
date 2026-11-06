@@ -3397,7 +3397,13 @@ export function initializeRuntime() {
       if (payload.preview_event) {
         const job = payload.preview_event, key = `${job.scope}:${job.id}`, old = previewJobs.get(key);
         if (!old || old.request_id === job.request_id || job.state === "queued" || job.request_id.startsWith("unavailable-")) {
-          previewJobs.set(key, job); renderCatalog();
+          previewJobs.set(key, job);
+          const card = payload.preview_card;
+          if (job.state === "succeeded" && card && card.scope === job.scope && card.id === job.id) {
+            state.catalog = (state.catalog || []).map(oldCard =>
+              oldCard.scope === card.scope && oldCard.id === card.id ? {...oldCard, ...card} : oldCard);
+          }
+          renderCatalog();
         }
       }
       if (Object.prototype.hasOwnProperty.call(payload, "replacement_result")) {

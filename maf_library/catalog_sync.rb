@@ -122,7 +122,7 @@ module MafLibrary
         end
         if transform || existing['instance_export'] == true
           verified = false
-          SelectedExport.with_definition(@model, definition, transform) do |candidate|
+          SelectedExport.with_definition(@model, definition, transform, preserve_orientation: !!entity) do |candidate|
             signature = DefinitionSignature.new(mode: :catalog).call(candidate)
             verified = signature[:complete] && !signature[:sampled] && signature[:digest] == existing['recognition_fingerprint']
           end
@@ -135,7 +135,7 @@ module MafLibrary
       end
       entry = nil
       export_warnings = []
-      SelectedExport.with_definition(@model, definition, transform) do |candidate, preparation|
+      SelectedExport.with_definition(@model, definition, transform, preserve_orientation: !!entity) do |candidate, preparation|
         preparation ||= {changed: !!transform, warnings: []}
         export_warnings = preparation[:warnings]
         signature = DefinitionSignature.new(mode: :catalog).call(candidate)

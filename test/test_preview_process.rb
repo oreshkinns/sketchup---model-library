@@ -35,7 +35,7 @@ class PreviewProcessTest < Minitest::Test
     assert_equal 'C:/Программы/SketchUp.exe',@native.launch_args[:executable]
     assert_equal '-RubyStartup',@native.launch_args[:arguments][1]
     script=File.read(@native.launch_args[:arguments][2])
-    assert_includes script,"File.join(__dir__, 'request.json')"
+    assert_includes script,"run_session(__dir__)"
     assert_includes script,'require "C:/a \\"quote\\"/worker.rb"'.gsub('\\\\','\\')
     refute_equal @seed,@native.launch_args[:arguments][0]
   end
@@ -98,5 +98,19 @@ class PreviewProcessTest
     api.wait=0; native.retry_cleanup
     assert_empty native.pending_cleanup
     assert_equal [9,10],api.closed
+  end
+end
+class PreviewProcessTest
+  def test_persistent_dispatch_stays_inside_owned_session_parent
+    File.write(File.join(@dir,'request.json'),'{}')
+    handle=launch
+    assert @adapter.respond_to?(:dispatch)
+    foreign=Dir.mktmpdir
+    begin
+      assert_raises(MafLibrary::PreviewProcess::OwnershipError) { @adapter.dispatch(handle,request_dir:foreign) }
+    ensure
+      FileUtils.remove_entry(foreign)
+    end
+    @adapter.stop(handle)
   end
 end

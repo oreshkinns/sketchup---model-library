@@ -750,7 +750,11 @@ module MafLibrary
     def refresh_catalog(message)
       # Catalog actions can change the sources retained by a queued scan.
       stop_scan('Каталог изменён. Анализ остановлен.') if @scan_job
-      cards = @catalogs.entries.map { |entry| catalog_card(entry) }
+      entries = @catalogs.entries
+      entries.each do |entry|
+        queue_preview(@catalogs.catalog(entry['scope']), entry['id']) if Catalog.automatic_preview_needed?(entry)
+      end
+      cards = entries.map { |entry| catalog_card(entry) }
       cards.concat(cloud_cards) if cloud
       push(catalog_update: {'catalog' => cards, 'sections' => @settings.sections,
                             'settings' => @settings.paths.merge('cloud_url' => @settings.cloud_url)},
@@ -824,30 +828,70 @@ module MafLibrary
       key = [scope, id]
       return @preview_requests[key] if @preview_requests[key]
       entry = catalog.find(id)
-      return unless entry && (explicit || (entry['preview_pending'] && !entry['thumbnail']))
+      return unless entry && (explicit || Catalog.automatic_preview_needed?(entry))
       unless @preview_coordinator
         raise 'Фоновое превью доступно только в Windows' unless RUBY_PLATFORM =~ /mswin|mingw/
         process = PreviewProcess.new(worker_script: File.join(__dir__, 'preview_worker.rb'),
                                      startup_template: File.join(__dir__, 'assets', 'preview-startup.skp'))
         @preview_coordinator = PreviewCoordinator.new(process: process, root: @settings.preview_worker_root,
           event_sink: method(:preview_event))
-        @preview_timer = UI.start_timer(0.25, true) { @preview_coordinator&.tick }
+        @preview_timer = UI.start_timer(0.25, true) do
+          @preview_coordinator&.tick
+          refill_pending_previews if @preview_refill_needed
+        end
       end
-      @preview_coordinator.enqueue(catalog: catalog, id: id, explicit: explicit)
+      @preview_attempted ||= {}
+      return if !explicit && @preview_attempted[key]
+      unless explicit || @preview_coordinator.capacity?
+        @preview_refill_needed = true
+        return
+      end
+      @preview_attempted ||= {}
+      @preview_attempted[key] = true
+      request_id = @preview_coordinator.enqueue(catalog: catalog, id: id, explicit: explicit)
+      @preview_coordinator.tick unless @refilling_previews
+      request_id
     rescue StandardError, NotImplementedError => error
       push(preview_event: {scope: scope, id: id, request_id: "unavailable-#{id}", state: 'failed', error: error.message})
       nil
     end
 
+    def refill_pending_previews
+      return if @refilling_previews || !@preview_coordinator || !@preview_coordinator.capacity?
+      @refilling_previews = true
+      @preview_refill_needed = false
+      @preview_attempted ||= {}
+      @catalogs.entries.each do |entry|
+        unless @preview_coordinator.capacity?
+          @preview_refill_needed = true
+          break
+        end
+        key = [entry['scope'], entry['id']]
+        next if @preview_attempted[key] || (@preview_requests || {})[key]
+        next unless Catalog.automatic_preview_needed?(entry)
+        queue_preview(@catalogs.catalog(entry['scope']), entry['id'])
+      end
+    ensure
+      @refilling_previews = false
+    end
+
     def preview_event(event)
+      @preview_requests ||= {}
       event_key = [event[:scope], event[:id]]
+      current = @preview_requests[event_key]
+      return if current && current != event[:request_id] && event[:state] != 'queued'
       if %w[queued running].include?(event[:state])
         @preview_requests[event_key] = event[:request_id]
       else
         @preview_requests.delete(event_key)
       end
-      push(preview_event: event)
-      refresh_catalog(nil) if event[:state] == 'succeeded'
+      payload = {preview_event: event}
+      if event[:state] == 'succeeded'
+        catalog = @catalogs.catalog(event[:scope])
+        entry = catalog.find(event[:id])
+        payload[:preview_card] = catalog_card(entry.merge('scope' => event[:scope])) if entry
+      end
+      push(payload)
     end
 
     def ensure_thumbnail(catalog, id)

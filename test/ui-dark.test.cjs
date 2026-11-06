@@ -3,7 +3,7 @@ const assert=require('node:assert/strict');
 const {chromium}=require('playwright');
 const fs=require('node:fs');
 const path=require('node:path');
-test('dark menus retain readable interaction states and baked white previews are subdued',async()=>{
+test('dark menus retain readable interaction states and preview colors remain unchanged',async()=>{
  const browser=await chromium.launch({headless:true});
  try {
  const page=await browser.newPage({viewport:{width:900,height:600}});
@@ -20,15 +20,9 @@ test('dark menus retain readable interaction states and baked white previews are
  if(state==='focus') {await page.mouse.move(850,550);await page.keyboard.press('Tab');}
  assert.ok((await contrast()).every(v=>v>=4.5),state+' menu contrast '+JSON.stringify(await contrast()));
  }
- assert.equal(await page.locator('img').evaluate(n=>getComputedStyle(n).filter),'brightness(0.75)');
+ assert.equal(await page.locator('img').evaluate(n=>getComputedStyle(n).filter),'none');
  await page.screenshot({path:path.join(__dirname,'../tmp/dark-menu-preview.png')});
  await page.evaluate(()=>document.documentElement.dataset.theme='light');
  assert.equal(await page.locator('img').evaluate(n=>getComputedStyle(n).filter),'none');
  } finally {await browser.close()}
 });
-
-
-
-
-
-

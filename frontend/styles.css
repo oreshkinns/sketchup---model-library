@@ -1,4 +1,5 @@
 :root {
+  --preview: #f5f6f6;
   --bg: #edf1f2;
   --panel: #fff;
   --ink: #1c303b;
@@ -15,6 +16,7 @@
 }
 @media (prefers-color-scheme: dark) {
   :root {
+    --preview: #35454c;
     --bg: #14232b;
     --panel: #1d303a;
     --ink: #e9f0f1;
@@ -31,6 +33,7 @@
   }
 }
 :root[data-theme="light"] {
+  --preview: #f5f6f6;
   --bg: #edf1f2;
   --panel: #fff;
   --ink: #1c303b;
@@ -1308,7 +1311,7 @@ body {
 }
 .catalog-art {
   height: 132px;
-  background: var(--soft);
+  background: var(--preview, var(--soft));
   border-radius: 5px;
 }
 .catalog-art img {
@@ -1769,8 +1772,3 @@ summary:focus-visible {
 .catalog-context-menu {box-sizing:border-box;}
 .catalog-context-heading {padding:8px 12px;font-weight:600;max-width:300px;overflow-wrap:anywhere;} .catalog-context-menu hr {border:0;border-top:1px solid var(--line,#d8dde2);margin:5px 0;}
 .catalog-context-menu .catalog-context-danger {color:var(--danger);}
-/* Tone down white pixels baked into model previews without altering source images. */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .catalog-art img { filter: brightness(.75); }
-}
-:root[data-theme="dark"] .catalog-art img { filter: brightness(.75); }

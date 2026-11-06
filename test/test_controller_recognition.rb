@@ -505,7 +505,8 @@ class ControllerRecognitionTest < Minitest::Test
     assert_equal 'Bench', cards.first['name']
     assert_nil cards.first['project_placements']
     assert_nil report
-    assert_empty UI.timers
+    assert UI.timers.values.all? { |interval, repeating, _| interval == 0.25 && repeating }, 'only background preview timer may run'
+    assert_nil @controller.instance_variable_get(:@scan_job)
   end
 
   def test_transaction_burst_waits_for_explicit_scan
@@ -1012,7 +1013,8 @@ class ControllerRecognitionTest < Minitest::Test
     assert_same old_report, report
     @controller.send(:panel_ready)
     assert_nil report
-    assert_empty UI.timers
+    assert UI.timers.values.all? { |interval, repeating, _| interval == 0.25 && repeating }, 'only background preview timer may run'
+    assert_nil @controller.instance_variable_get(:@scan_job)
     analyze
     refute_same old_report, report
     assert_equal 1, @model.observers.length
