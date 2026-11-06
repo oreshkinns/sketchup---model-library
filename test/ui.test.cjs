@@ -14,7 +14,7 @@ function fixture(){return {
 summary:{all_component_instances:10,all_component_definitions:4,maf_instances:8,maf_definitions:4},
 models:[row('1',{instances:3,recognized_catalog:true,catalog_id:'same',recognized_catalog_scope:'personal',recognition_warnings:['catalog_geometry_drift']}),row('2',{instances:2,recognized_catalog:true,catalog_id:'same',recognized_catalog_scope:'personal'}),row('3',{is_maf:false,recognition_source:'candidate',recognition_reason:'component_flags',recognition_warnings:['catalog_match_ambiguous'],names:['Кандидат','Имя экземпляра'],tags:['парк'],metadata:{bbox_mm:[1800,500,900],faces_count:12,edges_count:24,materials_count:2,nesting_depth:3,behavior_flags:{dynamic:true,glued:false},extension_attributes:{category:'Скамейки'}}}),row('4',{kind:'group',instances:2}),row('5',{instances:1})],
 hierarchy:[node('yard','container',{row_id:null,name:'Двор',kind:'group',is_maf:false,has_maf_descendant:true,instances:2,children:[node('yard/1','1',{instances:2}),node('yard/3','3',{is_maf:false})]}),node('park','4',{name:'Парк',kind:'group',instances:2,children:[node('park/1','1'),node('park/5','5')]})],
-catalog:[{id:'same',scope:'personal',name:'Скамья',category:'Скамейки',project_placements:5,version:2,sha256:'a'.repeat(64),bbox_mm:[1800,500,900],faces_count:12,edges_count:24,materials_count:2,file_size_bytes:2048,recognition_source:'manual'},{id:'same',scope:'shared',name:'Общая скамья',project_placements:0}],sections:['Скамейки'],settings:{},cleanup:{},catalog_sync_errors:[{row_id:'definition:3',code:'catalog_sync_failed',message:'Нет доступа к папке'}]
+catalog:[{id:'same',scope:'personal',name:'Скамья',category:'Скамейки',project_placements:5,version:2,sha256:'a'.repeat(64),bbox_mm:[1800,500,900],faces_count:12,edges_count:24,materials_count:2,file_size_bytes:2048,recognition_source:'manual'},{id:'same',scope:'shared',name:'Общая скамья',project_placements:0}],sections:['Скамейки'],settings:{},cleanup:{},catalog_sync_errors:[]
 };
 }
 async function open(t, data=fixture(), demo=false, legacy=false){const page=await browser.newPage({viewport:{width:1440,height:1100}});
@@ -579,10 +579,16 @@ assert.equal(await p.locator('[data-card-key="shared:same"]').getAttribute('tabi
 assert.equal(await p.locator('[data-card-key="shared:same"]').evaluate(el=>el===document.activeElement),true);
 });
 test('sync failure retry and explicit drift version update, placement preserved',async t=>{
-const p=await open(t);
-assert.match(await p.locator('#catalog-sync-errors').textContent(),/Нет доступа к папке/);
+const data=fixture();data.catalog_sync_errors=[{row_id:'definition:3',message:'Нет доступа к папке'}];
+const p=await open(t,data);
+assert.equal(await p.locator('#sync-warning-dialog').isVisible(),true);
+await p.locator('#sync-warning-dialog summary').click();
+assert.match(await p.locator('#sync-warning-dialog').textContent(),/Нет доступа к папке/);
+await p.keyboard.press('Escape');
+await p.locator('#show-sync-warnings').click();
 await p.locator('#retry-catalog-sync').click();
-assert.equal((await calls(p,'retry_catalog_sync')).length,1);
+assert.equal((await calls(p,'scan')).length,1);
+await p.evaluate(()=>MAF.receive({scan_state:'idle'}));
 await p.locator('[data-card-key="personal:same"] > details > summary').click();
 await p.locator('[data-card-key="personal:same"] [data-update-version]').click();
 assert.match(await p.locator('#modal-description').textContent(),/новую версию/);
@@ -958,4 +964,28 @@ test('large whole-group focus keeps complete IDs outside DOM attributes',async t
   const focus=p.locator('[data-focus-duplicate]');assert.ok((await focus.getAttribute('data-focus-duplicate')).length<10);
   assert.equal(await p.locator('.duplicate-comparison tbody tr').count(),20);await focus.click();
   assert.deepEqual((await calls(p,'focus_duplicates')).at(-1)[1],definitions.map(d=>d.id));
+});
+
+test('warnings preserve reading position, restore focus and queue behind actions',async t=>{
+ const data=fixture();data.catalog_sync_errors=Array.from({length:60},(_,i)=>({row_id:'definition:3',message:'Причина '+i}));
+ const p=await open(t,data);
+ await p.locator('#sync-warning-dialog summary').first().click();
+ await p.evaluate(data=>MAF.receive({data}),data);
+ assert.equal(await p.locator('#sync-warning-dialog details').first().getAttribute('open'),'');
+ await p.keyboard.press('Escape');
+ await p.evaluate(data=>MAF.receive({data}),data);
+ assert.equal(await p.locator('#sync-warning-dialog').isVisible(),false);
+ await p.locator('#show-sync-warnings').click();
+ await p.locator('#retry-catalog-sync').focus();await p.keyboard.press('Tab');
+ assert.equal(await p.locator('#close-sync-warnings').evaluate(el=>el===document.activeElement),true);
+ await p.keyboard.press('Escape');
+ assert.equal(await p.locator('#show-sync-warnings').evaluate(el=>el===document.activeElement),true);
+ await p.locator('[data-card-key="personal:same"] > details > summary').click();
+ await p.locator('[data-card-key="personal:same"] [data-update-version]').click();
+ data.catalog_sync_errors[0].message='Новая причина';
+ await p.evaluate(data=>MAF.receive({data}),data);
+ assert.equal(await p.locator('#sync-warning-dialog').isVisible(),false);
+ await p.evaluate(data=>MAF.receive({data}),data);
+ await p.locator('#cancel').click();
+ assert.equal(await p.locator('#sync-warning-dialog').isVisible(),true);
 });

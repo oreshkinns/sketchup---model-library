@@ -913,28 +913,52 @@ export function initializeRuntime() {
       ) || <p className={"empty"}>{"Параметры появятся после анализа."}</p>,
     );
   }
+  let syncWarningsPending = false;
+  let syncWarningsSignature = "";
+  let syncWarningsAnalyzing = false;
+  let syncWarningReturnFocus = null;
+  function closeSyncWarnings() {
+    const dialog = $("sync-warning-dialog");
+    if (dialog && dialog.open) dialog.close();
+    const target = syncWarningReturnFocus;
+    if (target && target.isConnected && target.offsetParent !== null) target.focus();
+    else $("show-sync-warnings")?.focus();
+  }
+  function openSyncWarnings() {
+    const dialog = $("sync-warning-dialog");
+    if (!dialog || dialog.open || $("modal-backdrop").classList.contains("open")) return;
+    syncWarningReturnFocus = document.activeElement;
+    syncWarningsPending = false;
+    dialog.showModal();
+    $("close-sync-warnings").focus();
+  }
   function renderSyncErrors() {
     const errors = state.catalog_sync_errors || [];
+    const signature = JSON.stringify(errors.map(error => [error.row_id, error.message, error.code, ((state.models || []).find(row => row.id === error.row_id) || {}).name]));
+    if (signature === syncWarningsSignature && $("sync-warning-dialog")) {
+      if (syncWarningsPending) openSyncWarnings();
+      return;
+    }
+    syncWarningsSignature = signature;
+    const existing = $("sync-warning-dialog");
+    if (existing?.open) existing.close();
     $("catalog-sync-errors").hidden = !errors.length;
-    mountView($("catalog-sync-errors"), [
-      viewList(
-        errors.map((error) => (
-          <p className={"sync-error"}>
-            {((state.models || []).find((row) => row.id === error.row_id) || {})
-              .name || "Модель"}
-            {": "}
-            {error.message || error.code}
-          </p>
-        )),
-      ),
-      errors.length ? (
-        <button className={"button small"} id={"retry-catalog-sync"}>
-          {"Повторить сохранение в личную библиотеку"}
-        </button>
-      ) : (
-        ""
-      ),
-    ]);
+    mountView($("catalog-sync-errors"), errors.length ? <>
+      <button className="button small" id="show-sync-warnings" onClick={openSyncWarnings}>Показать предупреждения ({errors.length})</button>
+      <dialog id="sync-warning-dialog" className="sync-warning-dialog" onKeyDown={(event) => {
+          if (event.key !== "Tab") return;
+          const nodes = Array.from(event.currentTarget.querySelectorAll("button, summary")).filter(node => node.offsetParent !== null);
+          const first = nodes[0], last = nodes[nodes.length - 1];
+          if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+          if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        }} aria-labelledby="sync-warning-title" onCancel={(event) => { event.preventDefault(); closeSyncWarnings(); }}>
+        <header className="sync-warning-header"><div><div className="eyebrow">Личная библиотека · {errors.length}</div><h2 id="sync-warning-title">Не удалось сохранить модели</h2></div><button className="button" id="close-sync-warnings" aria-label="Закрыть предупреждения" onClick={closeSyncWarnings}>×</button></header>
+        <p className="hint">Модели остались в проекте. Проверьте причины и повторите анализ.</p>
+        <ul className="sync-warning-list">{errors.map((error, index) => <li key={index}><details><summary><span className="sync-warning-marker" aria-hidden="true">!</span><span>{((state.models || []).find(row => row.id === error.row_id) || {}).name || "Модель"}</span><span className="sync-warning-chevron" aria-hidden="true">⌄</span></summary><p>{error.message || error.code || "Неизвестная причина"}</p></details></li>)}</ul>
+        <footer><button className="button primary" id="retry-catalog-sync">Повторить анализ</button></footer>
+      </dialog>
+    </> : null);
+    if (syncWarningsPending && errors.length) openSyncWarnings();
   }
   function renderCatalog() {
     if (activePage !== "catalog") return;
@@ -2264,6 +2288,7 @@ export function initializeRuntime() {
     modalKind = "";
     duplicateGroup = null;
     if (modalTrigger) modalTrigger.focus();
+    if (syncWarningsPending) openSyncWarnings();
   }
   function reconcileDemo() {
     const rows = new Map((state.models || []).map((row) => [row.id, row])),
@@ -2805,7 +2830,8 @@ export function initializeRuntime() {
       return;
     }
     if (event.target.closest("#retry-catalog-sync")) {
-      call("retry_catalog_sync");
+      closeSyncWarnings();
+      $("scan").click();
       return;
     }
     const page = event.target.closest("[data-page]");
@@ -3101,6 +3127,7 @@ export function initializeRuntime() {
   $("export-report").addEventListener("click", () => call("export_report"));
   $("scan").addEventListener("click", () => {
     if (scanState !== "idle") return;
+    syncWarningsAnalyzing = true;
     status("Анализ модели…");
     setScanState("running");
     if (demo) {
@@ -3376,6 +3403,9 @@ export function initializeRuntime() {
         placementDefinition = "";
         definitionPages.clear();
         state = payload.data;
+        const nextWarnings = JSON.stringify((state.catalog_sync_errors || []).map(error => [error.row_id, error.message, error.code, ((state.models || []).find(row => row.id === error.row_id) || {}).name]));
+        syncWarningsPending = !!(state.catalog_sync_errors || []).length && (syncWarningsPending || syncWarningsAnalyzing || nextWarnings !== syncWarningsSignature);
+        syncWarningsAnalyzing = false;
         pageOffsets = {};
         duplicateSelection.clear();
         cleanupSelection.clear();
@@ -3462,6 +3492,7 @@ export function initializeRuntime() {
         selectedIds = new Set(payload.selected_rows);
         renderSelection();
       }
+      if (payload.scan_state === "idle" && !payload.data) syncWarningsAnalyzing = false;
       if (payload.scan_state)
         setScanState(
           payload.scan_state,

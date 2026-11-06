@@ -130,6 +130,14 @@ require_relative '../maf_library/metadata'
 require_relative '../maf_library/array_layout'
 
 class CatalogTest < Minitest::Test
+  def setup
+    Sketchup.active_model = FakeModel.new([])
+  end
+
+  def teardown
+    Sketchup.active_model = FakeModel.new([])
+  end
+
   def test_catalog_annotations_and_usage_persist
     Dir.mktmpdir do |dir|
       source = File.join(dir, 'bench.skp')
