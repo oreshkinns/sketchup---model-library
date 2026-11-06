@@ -97,6 +97,32 @@ module MafLibrary
       raise
     end
 
+    def copy_from(path, source, category: nil)
+      expected = source['sha256'].to_s
+      raise ArgumentError, 'Файл модели отличается от карточки каталога' unless File.file?(path) && !expected.empty? && Digest::SHA256.file(path).hexdigest == expected
+      copy = import(path, name: "#{source['name']} (копия)",
+        category: category.to_s.strip.empty? ? source['category'] : category,
+        instance_export: source['instance_export'] == true, normalize: false)
+      update_entry(copy['id']) do |item|
+        %w[tags favorite bbox_mm faces_count edges_count materials_count].each do |key|
+          item[key] = source[key] if source.key?(key)
+        end
+      end
+      copy = find(copy['id'])
+      copy
+    rescue StandardError
+      if copy
+        begin
+          save(entries.reject { |item| item['id'] == copy['id'] })
+        ensure
+          copied_path = File.join(root, 'models', "#{copy['id']}.skp")
+          File.delete(copied_path) if File.file?(copied_path)
+          Dir.glob(File.join(root, 'thumbnails', "#{copy['id']}.*")).each { |path| File.delete(path) }
+        end
+      end
+      raise
+    end
+
     def find(id)
       entries.find { |entry| entry['id'] == id }
     end
@@ -463,7 +489,7 @@ module MafLibrary
   # Wrap the whole read/modify/write action, rather than only its final save.
   # Prepending keeps keyword arguments and the existing rollback scopes intact.
   module CatalogTransactions
-    %i[remove import add_definition update_definition_version rename assign_section
+    %i[remove import copy_from add_definition update_definition_version rename assign_section
        update_details mark_used scan_inbox save_thumbnail_data generate_thumbnail].each do |method|
       define_method(method) do |*args, **keywords, &block|
         with_catalog_transaction { super(*args, **keywords, &block) }

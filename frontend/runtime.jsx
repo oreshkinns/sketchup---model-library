@@ -1700,6 +1700,7 @@ export function initializeRuntime() {
       `Действие со всеми размещениями определения по всему проекту: ${rows.reduce((n, row) => n + (row.instances || 0), 0)}.\nПути: ${Array.from(new Set(flattenMap(rows, (row) => row.paths || []))).join(" · ") || "Пути недоступны — повторите анализ."}${state.report_stale ? "\nОтчёт устарел. Перед действием повторите анализ." : ""}`;
   }
   function showModal(kind, trigger, group) {
+    closeCatalogMenu();
     closeMenu();
     modalKind = kind;
     modalIds = Object.freeze(Array.from(selectedIds));
@@ -3078,6 +3079,81 @@ export function initializeRuntime() {
   $("focus-duplicates").addEventListener("click", () =>
     call("focus_duplicates", Array.from(duplicateSelection)),
   );
+  let copiedCatalogCard = null;
+  let catalogMenu = null;
+  function closeCatalogMenu(restore = false) {
+    if (!catalogMenu) return;
+    const trigger = catalogMenu.trigger;
+    catalogMenu.remove(); catalogMenu = null;
+    if (restore && trigger && trigger.isConnected) trigger.focus();
+  }
+  function openCatalogMenu(event) {
+    const card = event.target.closest('.catalog-card');
+
+    if (event.target.closest('input,textarea,select,[contenteditable="true"]')) return;
+    event.preventDefault(); closeMenu(); closeCatalogMenu();
+    const menu = document.createElement('div');
+    menu.tabIndex = -1; menu.className = 'catalog-context-menu'; menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', 'Действия с карточкой'); menu.trigger = card || $('catalog-list');
+    function action(label, callback, disabled = false) {
+      const button = document.createElement('button'); button.type = 'button';
+      button.setAttribute('role', 'menuitem'); button.textContent = label; button.disabled = disabled;
+      button.onclick = () => { closeCatalogMenu(true); callback(); };
+      if (label.includes('Удалить')) button.className = 'catalog-context-danger';
+      menu.appendChild(button);
+    }
+    if (card) {
+      const item = (state.catalog || []).find(x => x.scope + ':' + x.id === card.dataset.cardKey);
+      if (!item) return;
+      const heading = document.createElement('div'); heading.className = 'catalog-context-heading'; heading.textContent = item.name; menu.appendChild(heading);
+      for (const selector of ['[data-place]','[data-array][data-mode="line"]','[data-array][data-mode="surface"]','[data-favorite]','[data-change-catalog-section]','[data-tags]','[data-thumb-auto]','[data-thumb-file]','[data-update-version]']) {
+        const control = card.querySelector(selector);
+        if (control) action(selector === '[data-favorite]' ? (item.favorite ? 'Убрать из избранного' : 'В избранное') : selector === '[data-thumb-auto]' ? 'Создать превью' : selector === '[data-thumb-file]' ? 'Выбрать изображение…' : control.textContent.trim(), () => control.click(), control.disabled);
+      }
+      menu.appendChild(document.createElement('hr'));
+      action('Копировать карточку', () => { copiedCatalogCard = {id:item.id, scope:item.scope}; status('Карточка «' + item.name + '» скопирована'); });
+    }
+    if (!card && !copiedCatalogCard) action('Сначала скопируйте карточку', () => {}, true);
+    if (copiedCatalogCard) {
+      action('Вставить в модель', () => call('place_model', copiedCatalogCard.scope + ':' + copiedCatalogCard.id));
+      const scope = $('catalog-scope').value;
+      for (const destination of ['personal','shared']) {
+        if (scope && scope !== 'all' && scope !== destination) continue;
+        action(destination === 'personal' ? 'Вставить в личную библиотеку' : 'Вставить в общую библиотеку', () => {
+          const category = $('category').value;
+          call('copy_catalog_model', copiedCatalogCard.scope, copiedCatalogCard.id, destination, category && category !== 'all' ? category : null);
+        });
+      }
+      if (scope === 'cloud') action('Вставка в облако недоступна', () => {}, true);
+    }
+    if (card) {
+      const remove = card.querySelector('[data-delete-catalog]');
+      if (remove) { menu.appendChild(document.createElement('hr')); action(remove.textContent.trim(), () => remove.click(), remove.disabled); }
+    }
+    document.body.appendChild(menu); catalogMenu = menu;
+    const rect = (card || $("catalog-list")).getBoundingClientRect();
+    const x = event.type === 'keydown' ? rect.left : event.clientX;
+    const y = event.type === 'keydown' ? rect.bottom : event.clientY;
+    menu.style.left = Math.max(8, Math.min(x, innerWidth - menu.offsetWidth - 8)) + 'px';
+    menu.style.top = Math.max(8, Math.min(y, innerHeight - menu.offsetHeight - 8)) + 'px';
+    (menu.querySelector('button:not(:disabled)') || menu).focus({preventScroll:true});
+    menu.onkeydown = e => {
+      const buttons = [...menu.querySelectorAll('button:not(:disabled)')];
+      const index = buttons.indexOf(document.activeElement);
+      if (['ArrowDown','ArrowUp','Home','End'].includes(e.key)) {
+        e.preventDefault(); buttons[e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 : (index + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+      } else if (e.key === 'Escape') { e.preventDefault(); closeCatalogMenu(true); }
+      else if (e.key === 'Tab') closeCatalogMenu(true);
+    };
+  }
+  $('catalog-list').addEventListener('contextmenu', openCatalogMenu);
+  $('catalog-list').addEventListener('keydown', event => {
+    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) openCatalogMenu(event);
+  });
+  document.addEventListener('pointerdown', e => { if (catalogMenu && !catalogMenu.contains(e.target)) closeCatalogMenu(); });
+  document.addEventListener('scroll', e => { if (catalogMenu && !catalogMenu.contains(e.target)) closeCatalogMenu(); }, true);
+  window.addEventListener('resize', () => closeCatalogMenu());
+
   $("models-body").addEventListener("contextmenu", (event) => {
     const row = event.target.closest(".model-row");
     if (!row) return;

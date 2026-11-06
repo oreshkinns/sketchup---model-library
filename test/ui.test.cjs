@@ -989,3 +989,35 @@ test('warnings preserve reading position, restore focus and queue behind actions
  await p.locator('#cancel').click();
  assert.equal(await p.locator('#sync-warning-dialog').isVisible(),true);
 });
+
+test('catalog context menu copies card and pastes independent shared card',async t=>{
+ const p=await open(t); await p.locator('.catalog-card').first().click({button:'right'});
+ await p.getByRole('menuitem',{name:'Копировать карточку',exact:true}).click();
+ await p.locator('.catalog-card').first().click({button:'right'});
+ await p.screenshot({path:'D:/!AI_projects/sketchup-model-library/.tools/catalog-context-copied.png'});
+ await p.getByRole('menuitem',{name:'Вставить в общую библиотеку',exact:true}).click();
+ assert.deepEqual((await calls(p,'copy_catalog_model'))[0].slice(1),['personal','same','shared',null]);
+});
+
+test('catalog menu keyboard navigation stays inside viewport and restores card focus',async t=>{
+ const p=await open(t);const card=p.locator('.catalog-card').first();await card.focus();await card.press('Shift+F10');
+ const menu=p.getByRole('menu',{name:'Действия с карточкой'});assert.equal(await menu.count(),1);
+ await p.keyboard.press('End');await p.keyboard.press('Home');await p.keyboard.press('Escape');assert.equal(await menu.count(),0);assert.equal(await card.evaluate(x=>x===document.activeElement),true);
+ await p.setViewportSize({width:800,height:600});await p.waitForTimeout(100);await card.evaluate(x=>x.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:795,clientY:595})));
+ const box=await menu.boundingBox();assert.ok(box.x>=0 && box.y>=0 && box.x+box.width<=801 && box.y+box.height<=601,JSON.stringify(box));
+ await p.screenshot({path:'D:/!AI_projects/sketchup-model-library/.tools/catalog-context-edge.png'});
+ await p.keyboard.press('Escape');await p.setViewportSize({width:1440,height:1100});await card.click({button:'right'});
+ await p.screenshot({path:'D:/!AI_projects/sketchup-model-library/.tools/catalog-context-regular.png'});
+});
+
+
+
+
+
+
+test('catalog background keyboard paste menu anchors safely',async t=>{
+ const p=await open(t);await p.locator('.catalog-card').first().click({button:'right'});await p.getByRole('menuitem',{name:'Копировать карточку',exact:true}).click();
+ await p.locator('#catalog-list').evaluate(x=>{x.tabIndex=0;x.focus();x.dispatchEvent(new KeyboardEvent('keydown',{key:'ContextMenu',bubbles:true,cancelable:true}));});
+ assert.equal(await p.getByRole('menuitem',{name:'Вставить в модель',exact:true}).count(),1);
+ await p.getByRole('menuitem',{name:'Вставить в модель',exact:true}).click();assert.deepEqual((await calls(p,'place_model'))[0].slice(1),['personal:same']);
+});

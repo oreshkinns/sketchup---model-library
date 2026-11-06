@@ -244,6 +244,9 @@ module MafLibrary
       @dialog.add_action_callback('copy_selected_to_library') do |_context, scope, name, category|
         safely { add_selected_to_library(scope.to_s, name, category, copy_existing: true) }
       end
+      @dialog.add_action_callback('copy_catalog_model') do |_context, source_scope, source_id, destination_scope, category|
+        safely { copy_catalog_model(source_scope.to_s, source_id.to_s, destination_scope.to_s, category) }
+      end
       @dialog.add_action_callback('retry_catalog_sync') do |_context|
         safely { push(message: 'Запустите анализ модели, чтобы повторить запись в библиотеку.') }
       end
@@ -772,6 +775,18 @@ module MafLibrary
         @catalogs.catalog(entry['scope']).update_details(entry['id'], tags: tags, favorite: favorite)
       end
       refresh_catalog('Данные модели сохранены.')
+    end
+
+    def copy_catalog_model(source_scope, source_id, destination_scope, category = nil)
+      raise ArgumentError, 'Облачная библиотека доступна только для чтения' unless Settings::SCOPES.include?(destination_scope)
+      raise ArgumentError, 'Неизвестная библиотека' unless %w[personal shared cloud].include?(source_scope)
+      raw_id = source_id.delete_prefix("#{source_scope}:")
+      entry = find_catalog_entry("#{source_scope}:#{raw_id}")
+      path = source_scope == 'cloud' ? cloud.ensure_local(raw_id) : @catalogs.catalog(source_scope).file_for(raw_id)
+      raise ArgumentError, 'Файл модели каталога отсутствует' unless path && File.file?(path)
+      @catalogs.catalog(destination_scope).copy_from(path, entry, category: category)
+      mark_report_stale
+      refresh_catalog('Копия модели добавлена в библиотеку.')
     end
 
     def delete_catalog_model(id, scope)
