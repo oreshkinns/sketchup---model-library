@@ -5,7 +5,9 @@ module MafLibrary
     end
 
     def catalog(scope)
-      Catalog.new(@settings.path(scope), removal_allowed: @settings.removal_allowed?(scope))
+      Catalog.new(@settings.path(scope), removal_allowed: @settings.removal_allowed?(scope)).tap do |catalog|
+        catalog.preview_scope = scope
+      end
     end
 
     def entries

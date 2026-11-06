@@ -104,3 +104,14 @@ class PreviewProtocolChunkOrderTest < PreviewProtocolPngTest
     end
   end
 end
+class PreviewWorkerSchedulingTest < Minitest::Test
+  def test_session_request_completes_without_another_ui_timer
+    Dir.mktmpdir do |directory|
+      completed = false
+      MafLibrary::PreviewWorker.run({}, directory, immediate: true, completed: -> { completed = true })
+      assert completed
+      status = JSON.parse(File.read(File.join(directory, 'status.json')))
+      assert_equal 'failed', status['state']
+    end
+  end
+end

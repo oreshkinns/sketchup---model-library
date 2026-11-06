@@ -20,6 +20,8 @@ module MafLibrary
       @full_snapshot = full_snapshot
       @portable_materials = portable_materials
       @portable_texture_cache = {}
+      @face_geometry_cache = {}.compare_by_identity
+      @vertex_topology_cache = {}.compare_by_identity
       @signature_cache = {}
       @signature_complete = {}
       @signature_sampled = {}
@@ -240,21 +242,29 @@ module MafLibrary
     # Incidence distinguishes coincident but disconnected vertices/edges.
     # Object IDs never enter the token, so independently loaded files compare.
     def edge_topology_token(edge)
-      vertices = [edge.start, edge.end].map do |vertex|
-        incident = if vertex.respond_to?(:edges)
-                     vertex.edges.map do |neighbor|
-                       [point_token(neighbor.start.position), point_token(neighbor.end.position)].sort
-                     end.sort_by(&:to_s)
-                   else
-                     []
-                   end
-        [point_token(vertex.position), incident]
-      end.sort_by(&:to_s)
+      vertices = [edge.start, edge.end].map { |vertex| vertex_topology_token(vertex) }.sort_by(&:to_s)
       faces = edge.respond_to?(:faces) ? edge.faces.map { |face| face_geometry_token(face) }.sort_by(&:to_s) : []
       [vertices, faces]
     end
 
+    def vertex_topology_token(vertex)
+      return @vertex_topology_cache[vertex] if @vertex_topology_cache.key?(vertex)
+      incident = if vertex.respond_to?(:edges)
+                   vertex.edges.map do |neighbor|
+                     [point_token(neighbor.start.position), point_token(neighbor.end.position)].sort
+                   end.sort_by(&:to_s)
+                 else
+                   []
+                 end
+      @vertex_topology_cache[vertex] = [point_token(vertex.position), incident]
+    end
+
     def face_geometry_token(face)
+      return @face_geometry_cache[face] if @face_geometry_cache.key?(face)
+      @face_geometry_cache[face] = build_face_geometry_token(face)
+    end
+
+    def build_face_geometry_token(face)
       loops = if face.respond_to?(:loops)
                 face.loops.map { |loop| canonical_loop(loop.vertices.map { |vertex| point_token(vertex.position) }) }
               else

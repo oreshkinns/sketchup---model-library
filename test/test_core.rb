@@ -1090,7 +1090,7 @@ class ControllerTest
     catalog = Class.new do
       attr_accessor :preview_scope
       attr_reader :revision
-      def initialize; @revision = 0; end
+      def initialize; @revision = 0; @preview_scope = 'personal'; end
       def find(_); {'preview_pending' => true}; end
       def preview_target(*)
         @revision += 1
@@ -1174,7 +1174,7 @@ class ControllerTest
     entries = 70.times.map { |i| {'id' => i.to_s, 'scope' => 'personal', 'preview_pending' => true} }
     catalog = Object.new
     catalog.define_singleton_method(:find) { |id| entries.find { |e| e['id'] == id } }
-    catalog.define_singleton_method(:preview_scope=) { |_| }
+    catalog.define_singleton_method(:preview_scope) { 'personal' }
     catalogs = Struct.new(:item, :entries) { def catalog(_); item; end }.new(catalog, entries)
     @controller.instance_variable_set(:@catalogs, catalogs)
     @controller.instance_variable_set(:@preview_requests, {})

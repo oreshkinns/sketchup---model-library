@@ -13,6 +13,10 @@ module MafLibrary
     def initialize(report, catalog_entries:)
       @report = report
       @entries = Array(catalog_entries).select { |entry| CATALOG_SCOPES.include?(entry['scope']) }
+      @entries_by_id = @entries.group_by { |entry| entry['id'].to_s }
+      @entries_by_fingerprint = @entries.select { |entry| entry['maf_confirmed'] == true }
+        .group_by { |entry| entry['recognition_fingerprint'] }
+      @entries_by_fingerprint.each_value { |entries| entries.uniq! { |entry| [entry['scope'], entry['id']] } }
     end
 
     def apply
@@ -329,7 +333,7 @@ module MafLibrary
 
     def linked_entry(row)
       return if row['catalog_id'].to_s.empty?
-      candidates = @entries.select { |entry| entry['id'].to_s == row['catalog_id'].to_s }
+      candidates = @entries_by_id.fetch(row['catalog_id'].to_s, [])
       scope = row['catalog_scope'].to_s
       candidates = candidates.select { |entry| entry['scope'] == scope } unless scope.empty?
       return unless candidates.length == 1 && candidates.first['maf_confirmed'] == true
@@ -338,9 +342,7 @@ module MafLibrary
 
     def exact_entries(row)
       return [] unless row['recognition_complete'] && !row['recognition_sampled'] && row['recognition_fingerprint']
-      @entries.select do |entry|
-        entry['maf_confirmed'] == true && entry['recognition_fingerprint'] == row['recognition_fingerprint']
-      end.uniq { |entry| [entry['scope'], entry['id']] }
+      @entries_by_fingerprint.fetch(row['recognition_fingerprint'], [])
     end
 
     def attribute_exact_match(row, entries)

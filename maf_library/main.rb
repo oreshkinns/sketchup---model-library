@@ -767,6 +767,13 @@ module MafLibrary
            message: message)
     end
 
+    def refresh_catalog_card(scope, id, message)
+      stop_scan('Каталог изменён. Анализ остановлен.') if @scan_job
+      entry = @catalogs.find("#{scope}:#{id}")
+      queue_preview(@catalogs.catalog(scope), id) if Catalog.automatic_preview_needed?(entry)
+      push(catalog_card_update: catalog_card(entry), message: message)
+    end
+
     def catalog_card(entry)
       catalog = @catalogs.catalog(entry['scope'])
       entry.merge('thumbnail' => catalog.thumbnail_data(entry['id'], entry: entry),
@@ -793,7 +800,11 @@ module MafLibrary
       else
         @catalogs.catalog(entry['scope']).update_details(entry['id'], tags: tags, favorite: favorite)
       end
-      refresh_catalog('Данные модели сохранены.')
+      if entry['scope'] == 'cloud'
+        refresh_catalog('Данные модели сохранены.')
+      else
+        refresh_catalog_card(entry['scope'], entry['id'], 'Данные модели сохранены.')
+      end
     end
 
     def copy_catalog_model(source_scope, source_id, destination_scope, category = nil)
@@ -828,8 +839,8 @@ module MafLibrary
     end
 
     def queue_preview(catalog, id, explicit: false)
-      scope = Settings::SCOPES.find { |name| @catalogs.catalog(name).equal?(catalog) }
-      catalog.preview_scope = scope
+      scope = catalog.preview_scope
+      raise ArgumentError, 'Неизвестная библиотека превью' unless Settings::SCOPES.include?(scope)
       @preview_requests ||= {}
       key = [scope, id]
       return @preview_requests[key] if @preview_requests[key]
@@ -1433,7 +1444,7 @@ module MafLibrary
       raise ArgumentError, 'Раздел не найден' unless @settings.sections.include?(section)
       @catalogs.catalog(scope).assign_section(id, section)
       mark_report_stale
-      refresh_catalog("Раздел карточки изменён на «#{section}».")
+      refresh_catalog_card(scope, id, "Раздел карточки изменён на «#{section}».")
     end
 
     def choose_library_path(scope)
@@ -1462,7 +1473,7 @@ module MafLibrary
       catalog = @catalogs.catalog(entry['scope'])
       id = entry['id']
       catalog.save_thumbnail_data(id, data_url)
-      refresh_catalog('Изображение модели обновлено.')
+      refresh_catalog_card(entry['scope'], id, 'Изображение модели обновлено.')
     end
 
     def regenerate_thumbnail(id)
@@ -1663,8 +1674,7 @@ module MafLibrary
         @settings.mark_cloud_used(id)
       else
         catalog = @catalogs.catalog(entry['scope'])
-        catalog.update_details(id, metadata: Metadata.for_definition(definition))
-        catalog.mark_used(id)
+        catalog.mark_used(id, metadata: Metadata.for_definition(definition))
       end
       push(message: 'Курсор SketchUp готов к размещению модели.')
     end

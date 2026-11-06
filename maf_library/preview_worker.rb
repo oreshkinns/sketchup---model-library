@@ -37,15 +37,15 @@ module MafLibrary
           raise PreviewProtocol::Error, 'session model path mismatch' unless File.realpath(current.path) == File.join(session,'startup.skp')
           raise PreviewProtocol::Error, 'save owned startup failed' if current.modified? && !current.save(current.path)
           busy = root
-          run(request,root,session_token:token,bootstrap:bootstrap,session_path:session,completed:-> { busy = nil })
+          run(request,root,session_token:token,bootstrap:bootstrap,session_path:session,completed:-> { busy = nil },immediate:true)
         rescue StandardError => error
           # Parent startup/render deadlines stop only this owned process on invalid IPC.
           warn "Preview session: #{error.message}"
         end
       end
     end
-    def self.run(request, directory, session_token: nil, bootstrap: nil, session_path: nil, completed: nil)
-      UI.start_timer(0.1, false) do
+    def self.run(request, directory, session_token: nil, bootstrap: nil, session_path: nil, completed: nil, immediate: false)
+      work = proc do
         begin
           root=File.realpath(directory)
           raise PreviewProtocol::Error, 'worker marker mismatch' unless ENV['MAF_LIBRARY_PREVIEW_WORKER']==(session_token || request['token']) && ENV['MAF_LIBRARY_PREVIEW_REQUEST_DIR'] && (session_token || File.realpath(ENV['MAF_LIBRARY_PREVIEW_REQUEST_DIR'])==root)
@@ -86,6 +86,7 @@ module MafLibrary
           completed.call if completed
         end
       end
+      immediate ? work.call : UI.start_timer(0.1, false, &work)
     end
   end
 end

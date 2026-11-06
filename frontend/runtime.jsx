@@ -1,3 +1,4 @@
+import { indexCatalogLinks } from "./catalogLinks.cjs";
 import { DuplicateCard } from "./components.jsx";
 import {
   DuplicateActions,
@@ -985,6 +986,7 @@ export function initializeRuntime() {
           button.dataset.catalogView === view ? "true" : "false",
         ),
       );
+    const linkedByScope = indexCatalogLinks(state.models || []);
     let items = (state.catalog || []).filter((x) => {
       const tags = Array.isArray(x.tags) ? x.tags : [];
       const searchable = [x.name, x.category, ...tags].join(" ").toLowerCase();
@@ -1027,12 +1029,8 @@ export function initializeRuntime() {
                   : "Размер файла: —";
               const complexity = geometryText(x);
               const meta = [bbox, size, complexity].filter(Boolean).join(" · ");
-              const linked = (state.models || []).filter(
-                (row) =>
-                  row.recognized_catalog &&
-                  row.catalog_id === x.id &&
-                  row.recognized_catalog_scope === x.scope,
-              );
+              const linkedIds = linkedByScope.get(x.scope);
+              const linked = (linkedIds && linkedIds.get(x.id)) || [];
               const warnings = Array.from(
                 new Set([
                   ...(x.recognition_warnings || []),
@@ -3532,6 +3530,11 @@ export function initializeRuntime() {
           Array.from(selectedIds).filter((id) => valid.has(id)),
         );
       }
+      if (payload.catalog_card_update) {
+        const card = payload.catalog_card_update;
+        state = {...state, catalog: (state.catalog || []).map((old) =>
+          old.scope === card.scope && old.id === card.id ? {...old, ...card} : old)};
+      }
       if (payload.catalog_update) {
         const update = payload.catalog_update;
         if (update.catalog) {
@@ -3562,7 +3565,7 @@ export function initializeRuntime() {
           if (activePage === "duplicates") render();
         }
       }
-      if (payload.data || payload.catalog_update) render();
+      if (payload.data || payload.catalog_update || payload.catalog_card_update) render();
       else if (hasReportStale) renderReportStaleOnly();
       if (payload.open_catalog_id) {
         setPage("catalog");

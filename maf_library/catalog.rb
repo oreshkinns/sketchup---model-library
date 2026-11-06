@@ -307,8 +307,15 @@ module MafLibrary
       end
     end
 
-    def mark_used(id)
-      update_entry(id) { |entry| entry['last_used_at'] = Time.now.utc.iso8601 }
+    def mark_used(id, metadata: nil)
+      update_entry(id) do |entry|
+        if metadata
+          %w[file_size_bytes bbox_mm faces_count edges_count materials_count].each do |key|
+            entry[key] = metadata[key] if metadata.key?(key)
+          end
+        end
+        entry['last_used_at'] = Time.now.utc.iso8601
+      end
     end
 
     # Models dropped into inbox/<category> are copied into the managed store.
@@ -443,7 +450,7 @@ module MafLibrary
       end
     end
 
-    attr_writer :preview_scope
+    attr_accessor :preview_scope
 
     def publish_generated_thumbnail(id, validated_result:, expected_sha256:, expected_thumbnail_revision:)
       with_catalog_transaction do
