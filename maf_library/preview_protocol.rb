@@ -41,7 +41,7 @@ module MafLibrary
       raise Error, 'PNG size' unless File.file?(path) && File.size(path).between?(57,MAX_PNG)
       data = File.binread(path)
       raise Error, 'PNG signature' unless data.start_with?("\x89PNG\r\n\x1a\n".b)
-      offset=8; header=nil; ended=false; compressed=''.b
+      offset=8; header=nil; ended=false; compressed=''.b; idat_seen=false; idat_closed=false; palette=false
       while offset < data.bytesize
         raise Error, 'truncated chunk' if offset+12 > data.bytesize
         length=data.byteslice(offset,4).unpack1('N'); type=data.byteslice(offset+4,4)
@@ -55,7 +55,19 @@ module MafLibrary
         elsif type=='IHDR'
           raise Error, 'duplicate header'
         end
-        compressed << payload if type=='IDAT'
+        raise Error, 'PNG chunk type' unless type.match?(/\A[A-Za-z]{4}\z/) && (type.getbyte(2) & 32)==0
+        raise Error, 'unknown PNG critical chunk' if (type.getbyte(0) & 32)==0 && !%w[IHDR PLTE IDAT IEND].include?(type)
+        if type=='PLTE'
+          raise Error, 'PNG palette order' if palette || idat_seen || length==0 || length>768 || length%3!=0
+          palette=true
+        elsif type=='IDAT'
+          raise Error, 'PNG IDAT order' if idat_closed
+          idat_seen=true
+          compressed << payload
+        elsif idat_seen
+          idat_closed=true
+        end
+        raise Error, 'missing PNG data' if type=='IEND' && !idat_seen
         offset += length+12
         if type=='IEND'
           raise Error, 'PNG ending' unless length==0 && offset==data.bytesize
@@ -81,4 +93,5 @@ module MafLibrary
     end
   end
 end
+
 

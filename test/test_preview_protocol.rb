@@ -90,3 +90,17 @@ class PreviewProtocolBoundaryTest < PreviewProtocolPngTest
     end
   end
 end
+
+class PreviewProtocolChunkOrderTest < PreviewProtocolPngTest
+  def test_rejects_unknown_critical_and_interrupted_idat_with_valid_crc
+    header="\x89PNG\r\n\x1a\n".b+chunk('IHDR',[512,512,8,2,0,0,0].pack('NNCCCCC'))
+    compressed=Zlib.deflate(("\0"*(512*3+1))*512)
+    malformed=[header+chunk('ABCD','')+chunk('IDAT',compressed)+chunk('IEND',''),header+chunk('IDAT',compressed[0,3])+chunk('tEXt','comment')+chunk('IDAT',compressed[3..-1])+chunk('IEND','')]
+    Dir.mktmpdir do |d|
+      malformed.each do |data|
+        p=File.join(d,'bad.png'); File.binwrite(p,data)
+        assert_raises(MafLibrary::PreviewProtocol::Error) { MafLibrary::PreviewProtocol.validate_png(p) }
+      end
+    end
+  end
+end
