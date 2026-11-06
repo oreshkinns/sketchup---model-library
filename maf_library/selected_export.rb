@@ -136,7 +136,7 @@ module MafLibrary
       near.min_by { |item| [item[1].abs, item[1]] }[1]
     end
 
-    def self.with_definition(model, definition, transform)
+    def self.with_definition(model, definition, transform, operation_started: false)
       angle = footprint_angle(footprint_points(definition, transform)) if definition.respond_to?(:bounds)
       warnings = definition.respond_to?(:bounds) && angle.nil? ? [FRAME_WARNING] : []
       minimum = definition.bounds.min.to_a if definition.respond_to?(:bounds)
@@ -151,7 +151,7 @@ module MafLibrary
         warnings << THUMBNAIL_WARNING if protected && Thumbnail.supported?(definition)
         return yield(definition, {changed: false, warnings: warnings})
       end
-      started = model.start_operation('Подготовить масштабную копию МАФ', true)
+      started = operation_started || model.start_operation('Подготовить масштабную копию МАФ', true)
       raise 'SketchUp не начал экспорт копии компонента' unless started
       begin
         # Two temporary instances force make_unique even for an unused source.
@@ -174,7 +174,7 @@ module MafLibrary
         end
         yield(copy, {changed: changed, warnings: warnings, temporary_definition: true})
       ensure
-        model.abort_operation
+        model.abort_operation unless operation_started
       end
     end
 

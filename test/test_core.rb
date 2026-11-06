@@ -775,6 +775,7 @@ class ControllerTest < Minitest::Test
   end
 
   def test_import_thumbnail_extracts_managed_file_without_loading_source_model
+    original_model = Sketchup.active_model
     original_save = Sketchup.method(:save_thumbnail) if Sketchup.respond_to?(:save_thumbnail)
     Dir.mktmpdir do |dir|
       source = File.join(dir, 'window.skp')
@@ -797,6 +798,7 @@ class ControllerTest < Minitest::Test
       assert File.file?(catalog.thumbnail_path(entry['id']))
     end
   ensure
+    Sketchup.active_model = original_model
     if original_save
       Sketchup.define_singleton_method(:save_thumbnail, original_save)
     else

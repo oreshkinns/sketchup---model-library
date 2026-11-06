@@ -51,7 +51,7 @@ module MafLibrary
     end
     private :stored_entries
 
-    def import(source, name:, category:, instance_export: false)
+    def import(source, name:, category:, instance_export: false, normalize: true)
       raise ArgumentError, 'Выберите существующий файл .skp' unless File.file?(source) && File.extname(source).downcase == '.skp'
       name = name.to_s.strip
       raise ArgumentError, 'Укажите название модели' if name.empty?
@@ -60,7 +60,28 @@ module MafLibrary
       FileUtils.mkdir_p(File.join(root, 'models'))
       id = SecureRandom.uuid
       destination = File.join(root, 'models', "#{id}.skp")
-      FileUtils.cp(source, destination)
+      import_warnings = []
+      model = Sketchup.active_model if normalize && defined?(Sketchup) && Sketchup.respond_to?(:active_model)
+      if normalize && model && model.definitions.respond_to?(:load)
+        started = model.start_operation('Подготовить импорт МАФ', true)
+        raise 'SketchUp не начал импорт компонента' unless started
+        begin
+          definition = model.definitions.load(source)
+          raise 'SketchUp не загрузил компонент' unless definition
+          SelectedExport.with_definition(model, definition, nil, operation_started: true) do |prepared, preparation|
+            import_warnings = preparation[:warnings]
+            saved = Thumbnail.with_camera(prepared, temporary_definition: preparation[:temporary_definition]) do
+              prepared.respond_to?(:save_copy) ? prepared.save_copy(destination) : prepared.save_as(destination)
+            end
+            raise 'SketchUp не сохранил компонент' unless saved && File.file?(destination)
+          end
+        ensure
+          model.abort_operation
+        end
+      else
+        raise 'SketchUp не поддерживает импорт компонента' if normalize && defined?(Sketchup::Model)
+        FileUtils.cp(source, destination)
+      end
       entry = {'id' => id, 'name' => name, 'category' => category, 'version' => 1,
                'sha256' => Digest::SHA256.file(destination).hexdigest,
                'file_size_bytes' => File.size(destination), 'tags' => [], 'favorite' => false}
@@ -69,6 +90,7 @@ module MafLibrary
       items << entry
       save(items)
       generate_thumbnail(id)
+      entry['import_warnings'] = import_warnings if import_warnings && !import_warnings.empty?
       entry
     rescue StandardError
       File.delete(destination) if destination && File.file?(destination)

@@ -1378,7 +1378,7 @@ module MafLibrary
       catalog = @catalogs.catalog(scope)
       entry = catalog.import(path, name: values[0], category: values[1])
       ensure_thumbnail(catalog, entry['id']) unless catalog.thumbnail_path(entry['id'])
-      refresh_catalog("Добавлена модель «#{entry['name']}».")
+      refresh_catalog((["Добавлена модель «#{entry['name']}»."] + Array(entry['import_warnings'])).join(' '))
     end
 
     def selectable_entity?(entity)

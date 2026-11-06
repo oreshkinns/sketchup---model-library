@@ -65,7 +65,7 @@ module MafLibrary
         end
         # Preserve replacement safety without trusting imported confirmation or identity.
         entry = catalog.import(path, name: item['name'].to_s, category: item['category'].to_s,
-          instance_export: item['instance_export'] == true)
+          instance_export: item['instance_export'] == true, normalize: false)
         catalog.update_details(entry['id'], tags: item['tags'], favorite: item['favorite'], metadata: item)
         thumb = item['thumbnail'].to_s
         if thumb.match?(/\A[0-9a-f-]{36}\.(png|jpg|webp)\z/) && thumb.start_with?("#{item['id']}.")
