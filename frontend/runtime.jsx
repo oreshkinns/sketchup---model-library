@@ -315,6 +315,8 @@ export function initializeRuntime() {
   let collapsedNodes = new Set(),
     selectedNodeIds = new Set(),
     versionTarget = null,
+    selectedUpdateTarget = null,
+    selectedUpdateRequest = 0,
     catalogDeleteTarget = null,
     catalogSectionTarget = null,
     sectionDeleteTarget = null,
@@ -1788,6 +1790,12 @@ export function initializeRuntime() {
         ),
       );
     }
+    if (kind === "update-selected") {
+      $("modal-title").textContent = "Обновить из выделенного?";
+      $("modal-description").textContent = "Проверяем выделенный компонент или группу…";
+      $("confirm").disabled = true;
+      call("preview_selected_card_update", selectedUpdateTarget.id, selectedUpdateTarget.scope, selectedUpdateTarget.token);
+    }
     if (kind === "update-version") {
       $("modal-title").textContent = "Обновить версию карточки?";
       $("modal-description").textContent =
@@ -2285,6 +2293,7 @@ export function initializeRuntime() {
       actionInvalidated || !!state.report_stale || !(payload.groups > 0);
   }
   function closeModal() {
+    selectedUpdateTarget = null;
     previewToken++;
     $("modal-backdrop").classList.remove("open");
     modalKind = "";
@@ -2555,6 +2564,9 @@ export function initializeRuntime() {
         return;
       }
       call("copy_selected_to_library", value, input, $("modal-category").value);
+    } else if (kind === "update-selected") {
+      if (!selectedUpdateTarget?.previewToken) return;
+      call("confirm_selected_card_update", selectedUpdateTarget.previewToken);
     } else if (kind === "update-version") {
       call(
         "update_catalog_version",
@@ -2820,6 +2832,12 @@ export function initializeRuntime() {
       selectedNodeIds.clear();
       setSelection([decision.dataset.decisionRow], false);
       showModal("decision-" + decision.dataset.decision, decision);
+      return;
+    }
+    const selectedUpdate = event.target.closest("[data-update-selected]");
+    if (selectedUpdate) {
+      selectedUpdateTarget = {id: selectedUpdate.dataset.updateSelected, scope: selectedUpdate.dataset.updateScope, token: String(++selectedUpdateRequest)};
+      showModal("update-selected", selectedUpdate);
       return;
     }
     const update = event.target.closest("[data-update-version]");
@@ -3109,7 +3127,7 @@ export function initializeRuntime() {
       const item = (state.catalog || []).find(x => x.scope + ':' + x.id === card.dataset.cardKey);
       if (!item) return;
       const heading = document.createElement('div'); heading.className = 'catalog-context-heading'; heading.textContent = item.name; menu.appendChild(heading);
-      for (const selector of ['[data-place]','[data-array][data-mode="line"]','[data-array][data-mode="surface"]','[data-favorite]','[data-change-catalog-section]','[data-tags]','[data-thumb-auto]','[data-thumb-file]','[data-update-version]']) {
+      for (const selector of ['[data-place]','[data-array][data-mode="line"]','[data-array][data-mode="surface"]','[data-favorite]','[data-change-catalog-section]','[data-tags]','[data-thumb-auto]','[data-thumb-file]','[data-update-version]','[data-update-selected]']) {
         const control = card.querySelector(selector);
         if (control) action(selector === '[data-favorite]' ? (item.favorite ? 'Убрать из избранного' : 'В избранное') : selector === '[data-thumb-auto]' ? 'Создать превью' : selector === '[data-thumb-file]' ? 'Выбрать изображение…' : control.textContent.trim(), () => control.click(), control.disabled);
       }
@@ -3394,6 +3412,14 @@ export function initializeRuntime() {
   });
   window.MAF = {
     receive(payload) {
+      const updatePreview = payload.selected_card_update_preview;
+      if (updatePreview && modalKind === "update-selected" && selectedUpdateTarget && String(updatePreview.token) === selectedUpdateTarget.token && updatePreview.id === selectedUpdateTarget.id && updatePreview.scope === selectedUpdateTarget.scope) {
+        selectedUpdateTarget.previewToken = updatePreview.error ? null : updatePreview.preview_token;
+        $("confirm").disabled = !selectedUpdateTarget.previewToken;
+        $("modal-status").hidden = !updatePreview.error;
+        $("modal-status").textContent = updatePreview.error ? `${updatePreview.error} Закройте окно, исправьте выделение и повторите действие.` : "";
+        $("modal-description").textContent = updatePreview.error || `Заменить содержимое карточки «${updatePreview.target_name}» из выделенного объекта «${updatePreview.source_name}»? Название, категория и теги сохранятся. Размещения в проекте останутся без изменений.`;
+      }
       if (payload.preview_event) {
         const job = payload.preview_event, key = `${job.scope}:${job.id}`, old = previewJobs.get(key);
         if (!old || old.request_id === job.request_id || job.state === "queued" || job.request_id.startsWith("unavailable-")) {

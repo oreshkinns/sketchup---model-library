@@ -1021,3 +1021,37 @@ test('catalog background keyboard paste menu anchors safely',async t=>{
  assert.equal(await p.getByRole('menuitem',{name:'Вставить в модель',exact:true}).count(),1);
  await p.getByRole('menuitem',{name:'Вставить в модель',exact:true}).click();assert.deepEqual((await calls(p,'place_model'))[0].slice(1),['personal:same']);
 });
+
+test('selected card update scopes target, ignores stale preview, cancels without commit and restores focus', async t=>{
+ const p=await open(t); await p.locator('.nav [data-page="catalog"]').click();
+ await p.locator('[data-card-key="shared:same"] > details > summary').click();
+ const button=p.locator('[data-card-key="shared:same"] [data-update-selected]');
+ await button.click(); assert.equal(await p.locator('#confirm').isDisabled(),true);
+ let request=(await calls(p,'preview_selected_card_update')).at(-1);
+ assert.deepEqual(request.slice(1,3),['same','shared']);
+ await p.evaluate(token=>MAF.receive({selected_card_update_preview:{token:'stale',preview_token:'bad',id:'same',scope:'shared',source_name:'Source',target_name:'Target'}}),request[3]);
+ assert.equal(await p.locator('#confirm').isDisabled(),true);
+ await p.evaluate(token=>MAF.receive({selected_card_update_preview:{token,preview_token:'good',id:'same',scope:'shared',source_name:'<b>Source</b>',target_name:'Target'}}),request[3]);
+ assert.equal(await p.locator('#confirm').isEnabled(),true);
+ assert.match(await p.locator('#modal-description').textContent(),/<b>Source<\/b>/);
+ await p.keyboard.press('Escape'); assert.deepEqual(await calls(p,'confirm_selected_card_update'),[]);
+ assert.equal(await button.evaluate(e=>e===document.activeElement),true);
+ await button.click(); assert.equal(await p.locator('#confirm').isDisabled(),true);
+ request=(await calls(p,'preview_selected_card_update')).at(-1);
+ await p.evaluate(token=>MAF.receive({selected_card_update_preview:{token,preview_token:'fresh',id:'same',scope:'shared',source_name:'Source',target_name:'Target'}}),request[3]);
+ await p.locator('#confirm').click(); assert.deepEqual((await calls(p,'confirm_selected_card_update')).at(-1),['confirm_selected_card_update','fresh']);
+});
+
+ test('selected card preview errors remain visible and cancellation does not commit', async t=>{
+ const p=await open(t); await p.locator('.nav [data-page="catalog"]').click();
+ await p.locator('[data-card-key="personal:same"] > details > summary').click();
+ await p.locator('[data-card-key="personal:same"] [data-update-selected]').click();
+ const request=(await calls(p,'preview_selected_card_update')).at(-1);
+ await p.evaluate(token=>MAF.receive({selected_card_update_preview:{token,id:'same',scope:'shared',error:'Wrong scope'}}),request[3]);
+ assert.doesNotMatch(await p.locator('#modal-description').textContent(),/Wrong scope/);
+ await p.evaluate(token=>MAF.receive({selected_card_update_preview:{token,id:'same',scope:'personal',error:'Выделите один компонент или группу.'}}),request[3]);
+ assert.equal(await p.locator('#confirm').isDisabled(),true);
+ assert.equal(await p.locator('#modal-status').isVisible(),true);
+ assert.match(await p.locator('#modal-status').textContent(),/Выделите один компонент/);
+ await p.locator('#cancel').click(); assert.deepEqual(await calls(p,'confirm_selected_card_update'),[]);
+ });

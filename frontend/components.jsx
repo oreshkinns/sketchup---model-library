@@ -348,6 +348,7 @@ export function CatalogCard({
             ""
           ) : (
             <>
+              <button className={"button small"} data-update-selected={x.id} data-update-scope={x.scope}>{"Обновить из выделенного…"}</button>
               {linked.length || warnings.length ? (
                 <button
                   className={"button small"}

@@ -226,6 +226,60 @@ module MafLibrary
         [model_backup, manifest_backup].compact.each { |path| File.delete(path) if File.file?(path) }
       end
     end
+    def update_selected_version(id, definition, expected_version:, expected_sha:, instance_export:, temporary_definition: false)
+      items = entries
+      entry = items.find { |item| item['id'] == id }
+      raise ArgumentError, 'Модель не найдена в каталоге' unless entry
+      unless entry['version'].to_i == expected_version.to_i && entry['sha256'] == expected_sha
+        raise ArgumentError, 'Карточка изменилась. Откройте подтверждение заново'
+      end
+      destination = File.join(root, 'models', "#{id}.skp")
+      raise ArgumentError, 'Файл модели отсутствует в каталоге' unless File.file?(destination)
+      token = SecureRandom.uuid
+      candidate = File.join(root, 'models', ".#{token}.skp")
+      model_backup = "#{destination}.#{token}.rollback"
+      manifest_backup = "#{manifest_path}.#{token}.rollback"
+      original_manifest = File.file?(manifest_path) ? manifest_path : "#{manifest_path}.bak"
+      FileUtils.cp(original_manifest, manifest_backup)
+      saved = if temporary_definition
+                definition.respond_to?(:save_copy) ? definition.save_copy(candidate) : definition.save_as(candidate)
+              else
+                save_version_copy(definition, candidate)
+              end
+      raise 'SketchUp не сохранил компонент' unless saved && File.file?(candidate)
+      signature = DefinitionSignature.new(mode: :catalog).call(definition)
+      entry.merge!(Metadata.for_definition(definition))
+      entry['instance_export'] = instance_export == true
+      unless (entry['thumbnail_provenance'] || {})['kind'] == 'custom'
+        entry.delete('thumbnail')
+        entry.delete('thumbnail_provenance')
+        entry['thumbnail_revision'] = SecureRandom.uuid
+        entry['preview_pending'] = true
+      end
+      entry.merge!('version' => entry['version'].to_i + 1, 'maf_confirmed' => true, 'recognition_source' => 'manual',
+        'sha256' => Digest::SHA256.file(candidate).hexdigest, 'file_size_bytes' => File.size(candidate),
+        'recognition_fingerprint' => signature[:complete] && !signature[:sampled] ? signature[:digest] : nil)
+      File.rename(destination, model_backup)
+      File.rename(candidate, destination)
+      save(items)
+      cleanup_backups = true
+      entry
+    rescue StandardError
+      if model_backup && File.file?(model_backup)
+        FileUtils.mv(model_backup, destination, force: true)
+      end
+      if manifest_backup && File.file?(manifest_backup)
+        File.delete(manifest_path) if original_manifest != manifest_path && File.file?(manifest_path)
+        FileUtils.mv(manifest_backup, original_manifest, force: true)
+      end
+      cleanup_backups = true
+      raise
+    ensure
+      File.delete(candidate) if candidate && File.file?(candidate)
+      if cleanup_backups
+        [model_backup, manifest_backup].compact.each { |path| File.delete(path) if File.file?(path) }
+      end
+    end
     def rename(id, name)
       clean = name.to_s.strip
       raise ArgumentError, 'Укажите название модели' if clean.empty?
@@ -538,7 +592,7 @@ module MafLibrary
   # Wrap the whole read/modify/write action, rather than only its final save.
   # Prepending keeps keyword arguments and the existing rollback scopes intact.
   module CatalogTransactions
-    %i[remove import copy_from add_definition update_definition_version rename assign_section
+    %i[remove import copy_from add_definition update_definition_version update_selected_version rename assign_section
        update_details mark_used scan_inbox save_thumbnail_data generate_thumbnail].each do |method|
       define_method(method) do |*args, **keywords, &block|
         with_catalog_transaction { super(*args, **keywords, &block) }

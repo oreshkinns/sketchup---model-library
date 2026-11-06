@@ -253,6 +253,12 @@ module MafLibrary
       @dialog.add_action_callback('retry_catalog_sync') do |_context|
         safely { push(message: 'Запустите анализ модели, чтобы повторить запись в библиотеку.') }
       end
+      @dialog.add_action_callback('preview_selected_card_update') do |_context, id, scope, token|
+        safely { preview_selected_card_update(id, scope, token) }
+      end
+      @dialog.add_action_callback('confirm_selected_card_update') do |_context, token|
+        safely { confirm_selected_card_update(token) }
+      end
       @dialog.add_action_callback('update_catalog_version') do |_context, id, definition_id, scope|
         safely { update_catalog_version(id.to_s, definition_id, scope) }
       end
@@ -1543,6 +1549,57 @@ module MafLibrary
         end
       end
       invalidate_report('Решение для МАФ сохранено. Запустите анализ для обновления отчёта.')
+    end
+
+    def selected_card_update_snapshot(id, scope)
+      raise ArgumentError, 'Выберите личную или общую библиотеку' unless Settings::SCOPES.include?(scope.to_s)
+      entry = @catalogs.catalog(scope.to_s).find(id)
+      raise ArgumentError, 'Карточка не найдена' unless entry
+      definition = selected_definition
+      path = Array(model.active_path) + [model.selection.to_a.first]
+      transform = SelectedExport.for_path(path, preserve_orientation: true)
+      signature = DefinitionSignature.new(mode: :catalog, full_snapshot: true, portable_materials: true).call(definition)
+      unless signature[:complete] && !signature[:sampled]
+        raise ArgumentError, 'Не удалось проверить геометрию выделенного компонента'
+      end
+      {model: model, path: path, definition: definition, transform: transform,
+       id: id, scope: scope.to_s, version: entry['version'], sha: entry['sha256'],
+       source_signature: signature, source_guid: definition.respond_to?(:guid) ? definition.guid : nil,
+       source_name: definition.name, target_name: entry['name']}
+    end
+
+    def preview_selected_card_update(id, scope, request_token)
+      @selected_card_update = nil
+      snapshot = selected_card_update_snapshot(id.to_s, scope)
+      token = SecureRandom.hex(24)
+      @selected_card_update = snapshot.merge(token: token)
+      push(selected_card_update_preview: {token: request_token, preview_token: token,
+        id: snapshot[:id], scope: snapshot[:scope], source_name: snapshot[:source_name], target_name: snapshot[:target_name]})
+    rescue StandardError => error
+      @selected_card_update = nil
+      push(selected_card_update_preview: {token: request_token, id: id.to_s, scope: scope.to_s, error: error.message})
+      raise
+    end
+
+    def confirm_selected_card_update(token)
+      expected = @selected_card_update
+      @selected_card_update = nil
+      raise ArgumentError, 'Подтверждение устарело' unless expected && expected[:token] == token.to_s
+      current = selected_card_update_snapshot(expected[:id], expected[:scope])
+      unless current == expected.reject { |key, _| key == :token }
+        raise ArgumentError, 'Выделение или карточка изменились. Откройте подтверждение заново'
+      end
+      catalog = @catalogs.catalog(expected[:scope])
+      updated = with_service_writes do
+        SelectedExport.with_definition(model, expected[:definition], expected[:transform], preserve_orientation: true) do |definition, info|
+          catalog.update_selected_version(expected[:id], definition, expected_version: expected[:version],
+            expected_sha: expected[:sha], instance_export: info[:changed], temporary_definition: info[:temporary_definition] == true)
+        end
+      end
+      queue_preview(catalog, updated['id'])
+      invalidate_report(nil, catalog_changed: true) if @dialog && @dialog.visible? && !@panel_closed
+      refresh_catalog("Модель «#{updated['name']}» обновлена из выделенного.")
+      updated
     end
 
     def update_catalog_version(id, requested_definition = nil, scope = nil)
