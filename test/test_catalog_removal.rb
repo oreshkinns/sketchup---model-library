@@ -4,6 +4,7 @@ require_relative 'test_controller_recognition'
 
 class CatalogRemovalTest < Minitest::Test
   def setup
+    Sketchup.active_model = FakeModel.new([])
     @dir = Dir.mktmpdir
     @catalog = MafLibrary::Catalog.new(@dir)
     @source = File.join(@dir, 'source.skp')
@@ -12,6 +13,7 @@ class CatalogRemovalTest < Minitest::Test
   end
 
   def teardown
+    Sketchup.active_model = FakeModel.new([])
     FileUtils.remove_entry(@dir)
   end
 

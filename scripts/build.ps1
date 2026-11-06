@@ -20,6 +20,7 @@ try {
         Copy-Item -Destination (Join-Path $stagingPath 'maf_library')
     Get-ChildItem -LiteralPath (Join-Path $projectRoot 'maf_library\icons') -Filter '*.png' -File |
         Copy-Item -Destination (Join-Path $stagingPath 'maf_library\icons')
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'maf_library\assets') -Destination (Join-Path $stagingPath 'maf_library\assets') -Recurse
     Copy-Item -LiteralPath (Join-Path $projectRoot 'preview.html') -Destination (Join-Path $stagingPath 'maf_library\ui.html')
     [System.IO.Compression.ZipFile]::CreateFromDirectory($stagingPath, $archivePath)
     $archive = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
