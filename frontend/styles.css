@@ -869,6 +869,7 @@ small,
 }
 .catalog-card:focus {
   outline: 3px solid var(--accent);
+  outline-offset: -3px;
 }
 .catalog-warning {
   color: var(--warn);

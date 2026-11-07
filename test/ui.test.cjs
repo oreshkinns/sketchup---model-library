@@ -1055,3 +1055,34 @@ test('selected card update scopes target, ignores stale preview, cancels without
  assert.match(await p.locator('#modal-status').textContent(),/Выделите один компонент/);
  await p.locator('#cancel').click(); assert.deepEqual(await calls(p,'confirm_selected_card_update'),[]);
  });
+
+test('focused catalog cards keep their painted focus inside the gallery',async t=>{
+ const data=fixture(); data.catalog=Array.from({length:24},(_,i)=>({...data.catalog[0],id:`focus-${i}`,name:`Скамья ${i}`}));
+ const p=await open(t,data);
+ const fs=require('node:fs'); const out=path.join(__dirname,'../.tools/card-overlap01410');if(process.env.MAF_CAPTURE_FOCUS)fs.mkdirSync(out,{recursive:true});
+ for(const viewport of [{width:1440,height:1100},{width:940,height:700}]){
+ await p.setViewportSize(viewport);
+ for(const theme of ['light','dark'])for(const layout of ['small','medium','large','list']){
+  await p.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+  await p.locator(`[data-catalog-layout="${layout}"]`).click();
+  for(const edge of ['first','last']){
+   const card=edge==='first'?p.locator('.catalog-card').first():p.locator('.catalog-card').last();
+   await card.focus();await card.scrollIntoViewIfNeeded();
+   const bounds=await card.evaluate(n=>{const s=getComputedStyle(n),r=n.getBoundingClientRect(),g=document.querySelector('#catalog-list').getBoundingClientRect(),h=document.querySelector('.catalog-help').getBoundingClientRect();const outset=Math.max(0,parseFloat(s.outlineWidth)+parseFloat(s.outlineOffset));return {outset,width:parseFloat(s.outlineWidth),style:s.outlineStyle,left:r.left,right:r.right,top:r.top,bottom:r.bottom,gLeft:g.left,gRight:g.right,gTop:g.top,gBottom:g.bottom,helpTop:h.top};});
+   if(process.env.MAF_CAPTURE_FOCUS)await p.screenshot({path:path.join(out,`${viewport.width}-${theme}-${layout}-${edge}.png`)});
+   assert.ok(bounds.width>0&&bounds.style!=='none','keyboard focus remains visible');
+   assert.equal(bounds.outset,0,`${theme}/${layout}/${edge}: focus must paint inside card`);
+   assert.ok(bounds.left>=bounds.gLeft-1&&bounds.right<=bounds.gRight+1,'card fits gallery horizontally');
+   assert.ok(Math.min(bounds.bottom,bounds.gBottom)<=bounds.helpTop+1,'visible card and help do not overlap');
+   if(edge==='last'){
+    await card.locator('summary').filter({hasText:'Подробнее'}).click();
+    await p.locator('#catalog-list').evaluate(n=>n.scrollTop=n.scrollHeight);
+    const visible=await card.evaluate(n=>{const r=n.getBoundingClientRect(),g=document.querySelector('#catalog-list').getBoundingClientRect(),h=document.querySelector('.catalog-help').getBoundingClientRect();return {bottom:Math.min(r.bottom,g.bottom),help:h.top,reachable:r.bottom<=g.bottom+1};});
+    assert.ok(visible.bottom<=visible.help+1,'expanded details stay separate from help');
+    assert.ok(visible.reachable,'expanded last card bottom remains reachable');
+    await card.locator('summary').filter({hasText:'Подробнее'}).click();
+   }
+  }
+ }
+ }
+});
