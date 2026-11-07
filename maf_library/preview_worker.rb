@@ -4,6 +4,33 @@ require_relative 'definition_loader'
 require_relative 'thumbnail'
 module MafLibrary
   module PreviewWorker
+    # Bounds of rendered leaves, rather than definition bounds which include
+    # invisible tags and hidden geometry. Transform points through every parent.
+    def self.visible_bounds(entities, transformation = Geom::Transformation.new, bounds = Geom::BoundingBox.new)
+      entities.each do |entity|
+        next if entity.hidden? || !entity.layer.visible?
+        folder = entity.layer.respond_to?(:folder) ? entity.layer.folder : nil
+        folder_hidden = false
+        while folder
+          folder_hidden ||= !folder.visible?
+          folder = folder.respond_to?(:folder) ? folder.folder : nil
+        end
+        next if folder_hidden
+        if entity.respond_to?(:definition)
+          visible_bounds(entity.definition.entities, transformation * entity.transformation, bounds)
+        elsif entity.respond_to?(:entities)
+          visible_bounds(entity.entities, transformation * entity.transformation, bounds)
+        elsif entity.respond_to?(:vertices)
+          entity.vertices.each { |vertex| bounds.add(vertex.position.transform(transformation)) }
+        elsif entity.typename == 'ConstructionPoint'
+          bounds.add(entity.position.transform(transformation))
+        elsif ['Image', 'Text', 'ConstructionLine', 'DimensionLinear', 'DimensionRadial'].include?(entity.typename)
+          leaf_bounds = entity.bounds
+          8.times { |index| bounds.add(leaf_bounds.corner(index).transform(transformation)) } if leaf_bounds.valid?
+        end
+      end
+      bounds
+    end
     def self.camera_data(minimum, maximum)
       values=minimum+maximum
       sizes=minimum.zip(maximum).map { |a,b| b.to_f-a.to_f }
@@ -59,7 +86,8 @@ module MafLibrary
           raise PreviewProtocol::Error, 'empty geometry' unless definition && definition.entities.length > 0 && definition.bounds.valid?
           timings['load_finished']=Process.clock_gettime(Process::CLOCK_MONOTONIC)
           instance=model.entities.add_instance(definition,Geom::Transformation.new)
-          bounds=instance.bounds
+          bounds=visible_bounds(definition.entities)
+          raise PreviewProtocol::Error, 'no visible geometry' unless bounds.valid?
           data=camera_data(bounds.min.to_a,bounds.max.to_a)
           raise PreviewProtocol::Error, 'invalid bounds' unless data[:height].finite? && bounds.diagonal.to_f>0
           view=model.active_view

@@ -428,7 +428,7 @@ module MafLibrary
       return false if provenance['kind'] == 'custom'
       return true if entry['preview_pending'] && !entry['thumbnail']
       provenance['kind'] == 'generated' &&
-        provenance['renderer_version'] == 'background-axo-1' &&
+        %w[background-axo-1 background-axo-2].include?(provenance['renderer_version']) &&
         provenance['renderer_version'] != PreviewProtocol::RENDERER_VERSION
     end
 

@@ -35,6 +35,13 @@ class PreviewCatalogTest
         entry['thumbnail_provenance'] = {'kind'=>'generated','renderer_version'=>'background-axo-1','source_sha256'=>hash}
       end
       refute_nil catalog.preview_target(id), 'known generated v1 can migrate'
+      if MafLibrary::PreviewProtocol::RENDERER_VERSION != 'background-axo-2'
+        catalog.send(:update_entry, id) { |entry| entry['thumbnail_provenance']['renderer_version'] = 'background-axo-2' }
+        refute_nil catalog.preview_target(id), 'known generated v2 can migrate with unchanged source'
+        catalog.send(:update_entry, id) { |entry| entry['thumbnail_provenance']['source_sha256'] = '0'*64 }
+        assert_nil catalog.preview_target(id), 'v2 migration cannot bypass source SHA guard'
+        catalog.send(:update_entry, id) { |entry| entry['thumbnail_provenance']['source_sha256'] = hash }
+      end
       catalog.send(:update_entry, id) { |entry| entry['thumbnail_provenance']['renderer_version'] = MafLibrary::PreviewProtocol::RENDERER_VERSION }
       assert_nil catalog.preview_target(id), 'current renderer never requeues'
       catalog.send(:update_entry, id) { |entry| entry['thumbnail_provenance']['renderer_version'] = 'unknown' }

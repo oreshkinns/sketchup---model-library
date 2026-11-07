@@ -4,13 +4,13 @@ require 'zlib'
 module MafLibrary
   module PreviewProtocol
     class Error < StandardError; end
-    RENDERER_VERSION = 'background-axo-2'.freeze
+    RENDERER_VERSION = 'background-axo-3'.freeze
     MAX_PNG = 5_000_000
     def self.request(source_path:, expected_sha256:, request_id:, token:)
       path = File.realpath(source_path)
       raise Error, 'invalid identity' if request_id.to_s.empty? || token.to_s.empty? || expected_sha256 !~ /\A[0-9a-f]{64}\z/
       raise Error, 'source changed' unless Digest::SHA256.file(path).hexdigest == expected_sha256
-      {'schema'=>1,'renderer_version'=>RENDERER_VERSION,'camera_version'=>'iso-1','width'=>512,'height'=>512,'source_path'=>path,'source_sha256'=>expected_sha256,'request_id'=>request_id,'token'=>token}.each_value { |v| v.freeze }.freeze
+      {'schema'=>1,'renderer_version'=>RENDERER_VERSION,'camera_version'=>'iso-2','width'=>512,'height'=>512,'source_path'=>path,'source_sha256'=>expected_sha256,'request_id'=>request_id,'token'=>token}.each_value { |v| v.freeze }.freeze
     end
     def self.owned_path(directory, name)
       root = File.realpath(directory)

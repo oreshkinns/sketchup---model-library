@@ -115,3 +115,58 @@ class PreviewWorkerSchedulingTest < Minitest::Test
     end
   end
 end
+
+class PreviewVisibleBoundsTest < Minitest::Test
+  Layer = Struct.new(:shown, :folder) do
+    def visible?; shown; end
+  end
+  Point = Struct.new(:value) do
+    def transform(matrix); value.map.with_index { |x,i| x + matrix[i] }; end
+  end
+  Vertex = Struct.new(:position)
+  Leaf = Struct.new(:hidden, :layer, :vertices) do
+    def hidden?; hidden; end
+  end
+  Transform = Struct.new(:offset) do
+    def *(other); offset.zip(other.offset).map { |a,b| a+b }; end
+  end
+  Parent = Struct.new(:hidden, :layer, :entities, :transformation) do
+    def hidden?; hidden; end
+  end
+  def test_visibility_ancestors_and_transformed_vertices
+    shown=Layer.new(true,nil); hidden=Layer.new(false,nil)
+    leaf=Leaf.new(false,shown,[Vertex.new(Point.new([1,2,3]))])
+    outlier=Leaf.new(false,hidden,[Vertex.new(Point.new([900,900,900]))])
+    folder_leaf=Leaf.new(false,Layer.new(true,Layer.new(true,hidden)),outlier.vertices)
+    parent=Parent.new(false,shown,[leaf,outlier,folder_leaf],Transform.new([10,20,30]))
+    points=[]
+    bounds=Object.new
+    bounds.define_singleton_method(:add) { |p| points << p }
+    MafLibrary::PreviewWorker.visible_bounds([parent],Transform.new([0,0,0]),bounds)
+    assert_equal [[11,22,33]],points
+    parent.hidden=true;points.clear
+    MafLibrary::PreviewWorker.visible_bounds([parent],Transform.new([0,0,0]),bounds)
+    assert_empty points
+  end
+end
+
+class PreviewVisibleBoundsTest
+  def test_dimension_leaf_bounds_keep_extended_annotations
+    ['DimensionLinear','DimensionRadial'].each do |type|
+      corners=[[0,0,0],[10,100,0]]*4
+      leaf_bounds=Object.new
+      leaf_bounds.define_singleton_method(:valid?) { true }
+      leaf_bounds.define_singleton_method(:corner) { |index| Point.new(corners[index]) }
+      entity=Object.new
+      entity.define_singleton_method(:hidden?) { false }
+      entity.define_singleton_method(:layer) { Layer.new(true,nil) }
+      entity.define_singleton_method(:typename) { type }
+      entity.define_singleton_method(:bounds) { leaf_bounds }
+      points=[];bounds=Object.new
+      bounds.define_singleton_method(:add) { |point| points << point }
+      MafLibrary::PreviewWorker.visible_bounds([entity],[10,20,30],bounds)
+      assert_includes points,[20,120,30]
+      assert_equal 8,points.length
+    end
+  end
+end

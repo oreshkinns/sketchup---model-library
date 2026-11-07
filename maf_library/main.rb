@@ -843,8 +843,14 @@ module MafLibrary
       raise ArgumentError, 'Неизвестная библиотека превью' unless Settings::SCOPES.include?(scope)
       @preview_requests ||= {}
       key = [scope, id]
-      return @preview_requests[key] if @preview_requests[key]
       entry = catalog.find(id)
+      signature = entry && [entry['version'], entry['sha256']]
+      @preview_source_signatures ||= {}
+      if @preview_requests[key]
+        return @preview_requests[key] if @preview_source_signatures[key] == signature
+        previous = @preview_requests.delete(key)
+        @preview_coordinator.cancel(previous)
+      end
       return unless entry && (explicit || Catalog.automatic_preview_needed?(entry))
       unless @preview_coordinator
         raise 'Фоновое превью доступно только в Windows' unless RUBY_PLATFORM =~ /mswin|mingw/
@@ -858,13 +864,14 @@ module MafLibrary
         end
       end
       @preview_attempted ||= {}
-      return if !explicit && @preview_attempted[key]
+      return if !explicit && @preview_attempted[key] == signature
       unless explicit || @preview_coordinator.capacity?
         @preview_refill_needed = true
         return
       end
       @preview_attempted ||= {}
-      @preview_attempted[key] = true
+      @preview_attempted[key] = signature
+      @preview_source_signatures[key] = signature
       request_id = @preview_coordinator.enqueue(catalog: catalog, id: id, explicit: explicit)
       @preview_coordinator.tick unless @refilling_previews
       request_id
@@ -884,7 +891,8 @@ module MafLibrary
           break
         end
         key = [entry['scope'], entry['id']]
-        next if @preview_attempted[key] || (@preview_requests || {})[key]
+        signature = [entry['version'], entry['sha256']]
+        next if @preview_attempted[key] == signature || (@preview_requests || {})[key]
         next unless Catalog.automatic_preview_needed?(entry)
         queue_preview(@catalogs.catalog(entry['scope']), entry['id'])
       end
