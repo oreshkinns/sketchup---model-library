@@ -842,6 +842,28 @@ export function ActionModal() {
             </label>
             <input id={"modal-input"} type={"text"} maxLength={"80"}></input>
           </div>
+<div id="array-fields" hidden={true}>
+            <div className="field" id="array-spacing-field">
+            <label htmlFor="array-spacing">Шаг, мм (100–10000)</label>
+            <input id="array-spacing" type="number" defaultValue="1000" />
+            </div>
+            <div className="field" id="array-density-field">
+            <label htmlFor="array-density">Плотность на 1 м² (0.01–100)</label>
+            <input id="array-density" type="number" defaultValue="1" />
+            </div>
+            <div className="field" id="array-setback-field">
+            <label htmlFor="array-setback">Отступ, мм (0–10000)</label>
+            <input id="array-setback" type="number" defaultValue="0" />
+            </div>
+            <div className="field" id="array-rotation-field">
+            <label htmlFor="array-rotation">Поворот ±градусов (0–180)</label>
+            <input id="array-rotation" type="number" defaultValue="0" />
+            </div>
+            <div className="field" id="array-seed-field">
+            <label htmlFor="array-seed">Seed (целое число)</label>
+            <input id="array-seed" type="number" defaultValue="0" />
+            </div>
+            </div>
           <div className={"field"} id={"modal-select-field"} hidden={true}>
             <label htmlFor={"modal-select"} id={"modal-select-label"}>
               {"Выберите вариант"}

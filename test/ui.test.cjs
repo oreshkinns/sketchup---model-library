@@ -611,6 +611,7 @@ test('shared actions retain the selected scope when a personal card has the same
   p.on('dialog',dialog=>dialog.accept(dialog.defaultValue()));
   for (const mode of ['line','surface']) {
     await shared.locator('[data-mode="'+mode+'"]').click();
+    await p.locator('#confirm').click();
     assert.deepEqual((await calls(p,'start_array')).at(-1).slice(0,4),['start_array','shared:same',mode,1000]);
   }
   await p.locator('.nav [data-page="overview"]').click();
@@ -1085,4 +1086,23 @@ test('focused catalog cards keep their painted focus inside the gallery',async t
   }
  }
  }
+});
+
+test('array parameters use catalog modal without native prompts', async t=>{
+ const p=await open(t); await p.evaluate(()=>{window.prompt=()=>{throw Error('native prompt forbidden')}});
+ const card=p.locator('[data-card-key="shared:same"]'); await card.locator(':scope > details > summary').click();
+ await card.locator('[data-mode="line"]').click();
+ assert.equal(await p.locator('#array-fields').isVisible(),true);
+ await p.locator('#array-spacing').fill('50'); await p.locator('#confirm').click();
+ assert.equal((await calls(p,'start_array')).length,0); assert.equal(await p.locator('#modal-status').isVisible(),true);
+ await p.locator('#array-spacing').fill('500'); await p.locator('#confirm').click();
+ assert.deepEqual((await calls(p,'start_array')).at(-1),['start_array','shared:same','line',500]);
+ await card.locator('[data-mode="surface"]').click(); await p.locator('#cancel').click();
+ assert.equal((await calls(p,'start_array')).length,1);
+ await card.locator('[data-mode="surface"]').click(); await p.locator('#array-seed').fill('0.5'); await p.locator('#confirm').click();
+ assert.equal((await calls(p,'start_array')).length,1); await p.locator('#array-seed').fill('0'); await p.locator('#confirm').click();
+ assert.deepEqual((await calls(p,'start_array')).at(-1),['start_array','shared:same','surface',1000,{density:1,setback_mm:0,rotation_degrees:0,seed:0}]);
+ await card.locator('[data-mode="line"]').click(); await p.keyboard.press('Escape');
+ assert.equal(await p.locator('#modal-backdrop').evaluate(e=>e.classList.contains('open')),false);
+ assert.equal(await card.locator('[data-mode="line"]').evaluate(e=>e===document.activeElement),true);
 });

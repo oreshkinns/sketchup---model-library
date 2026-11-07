@@ -82,7 +82,7 @@ module MafLibrary
       direction = @current - @start
       return if direction.length < 0.001
       x_axis = direction.normalize
-      z_axis = Z_AXIS
+      z_axis = x_axis.parallel?(Z_AXIS) ? Y_AXIS : Z_AXIS
       y_axis = z_axis.cross(x_axis)
       return if y_axis.length < 0.001
       y_axis.normalize!
@@ -96,7 +96,7 @@ module MafLibrary
       @transforms = []
       face = @face
       return unless face.is_a?(Sketchup::Face) && face.valid? && @model.active_entities.include?(face)
-      vertices = face.vertices.map(&:position)
+      vertices = face.outer_loop.vertices.map(&:position)
       return if vertices.length < 3
       origin = vertices.first
       x_axis = (vertices[1] - origin).normalize
@@ -119,8 +119,8 @@ module MafLibrary
           next unless point_on_face?(face, point)
           next if overlaps_existing_instance?(point, face, origin, x_axis, y_axis, z_axis, footprint / 2.0)
           cosine, sine = Math.cos(angle), Math.sin(angle)
-          rotated_x = x_axis * cosine + y_axis * sine
-          rotated_y = y_axis * cosine - x_axis * sine
+          rotated_x = Geom::Vector3d.new(*3.times.map { |i| x_axis[i] * cosine + y_axis[i] * sine })
+          rotated_y = Geom::Vector3d.new(*3.times.map { |i| y_axis[i] * cosine - x_axis[i] * sine })
           @transforms << Geom::Transformation.axes(point, rotated_x, rotated_y, z_axis)
         end
       else

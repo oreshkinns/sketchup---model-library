@@ -1700,7 +1700,9 @@ export function initializeRuntime() {
     $("action-scope").textContent =
       `Действие со всеми размещениями определения по всему проекту: ${rows.reduce((n, row) => n + (row.instances || 0), 0)}.\nПути: ${Array.from(new Set(flattenMap(rows, (row) => row.paths || []))).join(" · ") || "Пути недоступны — повторите анализ."}${state.report_stale ? "\nОтчёт устарел. Перед действием повторите анализ." : ""}`;
   }
+  let arrayTarget = null;
   function showModal(kind, trigger, group) {
+    $("array-fields").hidden = true;
     closeCatalogMenu();
     closeMenu();
     modalKind = kind;
@@ -2490,6 +2492,17 @@ export function initializeRuntime() {
   }
   function submitModal() {
     if (actionInvalidated || $("confirm").disabled) return;
+    if (modalKind === "array") {
+      const v = {};
+      for (const n of ["spacing","density","setback","rotation","seed"]) v[n] = $("array-"+n).value.trim() === "" ? NaN : Number($("array-"+n).value);
+      const valid = arrayTarget.mode === "line" ? Number.isFinite(v.spacing) && v.spacing >= 100 && v.spacing <= 10000 : Number.isFinite(v.density) && v.density >= .01 && v.density <= 100 && Number.isFinite(v.setback) && v.setback >= 0 && v.setback <= 10000 && Number.isFinite(v.rotation) && v.rotation >= 0 && v.rotation <= 180 && Number.isInteger(v.seed);
+      if (!valid) { $("modal-status").textContent = "Проверьте параметры и допустимые диапазоны."; $("modal-status").hidden = false; return; }
+      const target = arrayTarget;
+      closeModal();
+      if (target.mode === "line") call("start_array", target.id, "line", v.spacing);
+      else call("start_array", target.id, "surface", 1000, {density:v.density,setback_mm:v.setback,rotation_degrees:v.rotation,seed:v.seed});
+      return;
+    }
     const kind = modalKind,
       ids = modalIds.slice(),
       value = $("modal-select").value,
@@ -2932,49 +2945,17 @@ export function initializeRuntime() {
     }
     const array = event.target.closest("[data-array]");
     if (array) {
-      if (array.dataset.mode === "surface") {
-        const density = prompt("Плотность: моделей на 1 м² (0.01–100)", "1");
-        if (density === null) return;
-        const setback = prompt("Отступ от границы, мм (0–10000)", "0");
-        if (setback === null) return;
-        const rotation = prompt("Случайный поворот ±градусов (0–180)", "0");
-        if (rotation === null) return;
-        const seed = prompt(
-          "Seed для повторяемой раскладки (целое число)",
-          "0",
-        );
-        if (seed === null) return;
-        const options = {
-          density: Number(density),
-          setback_mm: Number(setback),
-          rotation_degrees: Number(rotation),
-          seed: Number(seed),
-        };
-        if (
-          !Number.isFinite(options.density) ||
-          options.density < 0.01 ||
-          options.density > 100 ||
-          !Number.isFinite(options.setback_mm) ||
-          options.setback_mm < 0 ||
-          options.setback_mm > 10000 ||
-          !Number.isFinite(options.rotation_degrees) ||
-          options.rotation_degrees < 0 ||
-          options.rotation_degrees > 180 ||
-          !Number.isInteger(options.seed)
-        ) {
-          status("Проверьте плотность, отступ, поворот и seed.", "error");
-          return;
-        }
-        call("start_array", catalogIdentity(array, array.dataset.array), "surface", 1000, options);
-      } else {
-        const answer = prompt("Шаг в миллиметрах (100–10000)", "1000");
-        if (answer !== null) {
-          const value = Number(answer);
-          if (!Number.isFinite(value) || value < 100 || value > 10000)
-            status("Шаг должен быть от 100 до 10000 мм.", "error");
-          else call("start_array", catalogIdentity(array, array.dataset.array), "line", value);
-        }
+      arrayTarget = {id: catalogIdentity(array, array.dataset.array), mode: array.dataset.mode};
+      showModal("array", array);
+      $("modal-title").textContent = arrayTarget.mode === "line" ? "Раскладка по линии" : "Раскладка по поверхности";
+      $("modal-description").textContent = "Задайте параметры, затем укажите место в SketchUp.";
+      $("array-fields").hidden = false;
+      for (const [name, value] of Object.entries({spacing:1000,density:1,setback:0,rotation:0,seed:0})) {
+        $("array-"+name).value = value;
+        $("array-"+name+"-field").hidden = arrayTarget.mode === "line" ? name !== "spacing" : name === "spacing";
       }
+      $("confirm").textContent = "Начать";
+      $("array-"+(arrayTarget.mode === "line" ? "spacing" : "density")).focus();
       return;
     }
     const place = event.target.closest("[data-place]");
