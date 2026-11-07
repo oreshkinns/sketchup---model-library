@@ -43,6 +43,7 @@ module MafLibrary
       raise PreviewProtocol::Error, 'session marker mismatch' unless token && token.match?(/\A[0-9a-f]{64}\z/) && File.realpath(ENV.fetch('MAF_LIBRARY_PREVIEW_REQUEST_DIR')) == session
       raise PreviewProtocol::Error, 'session startup mismatch' unless File.realpath(Sketchup.active_model.path) == File.join(session,'startup.skp')
       bootstrap = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      PreviewProtocol.atomic_json(session, 'ready.json', {'token'=>token, 'pid'=>Process.pid})
       busy = nil
       UI.start_timer(0.1, true) do
         begin

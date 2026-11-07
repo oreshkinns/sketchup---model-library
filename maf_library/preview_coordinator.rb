@@ -12,6 +12,14 @@ module MafLibrary
       FileUtils.mkdir_p(@root)
       @root = File.realpath(@root)
     end
+    def prepare
+      return false if @closed || @session || @active || !@process.respond_to?(:prepare)
+      @process.retry_cleanup
+      @session = @process.prepare(root: @root)
+      @session_started_at = now
+      @session_ready = false
+      true
+    end
     def capacity?
       @jobs.sum { |job| job[:targets].length } < 32 && !@closed
     end
@@ -50,22 +58,46 @@ module MafLibrary
     end
     def tick
       return if @closed
-      if @session && @jobs.empty? && now - @idle_at >= 15
-        @process.stop(@session); @session = nil
+      if @session
+        begin
+          unless @process.alive?(@session)
+            @session = nil # alive? has reaped this owned handle.
+            raise 'renderer exited'
+          end
+          if @session_started_at && !@session_ready
+            raise 'renderer startup timeout' if now >= @session_started_at + 60
+            @session_ready = @process.ready?(@session)
+            if @session_ready
+              @idle_at = now
+              @session_started_at = nil
+            end
+            raise 'renderer startup timeout' if !@session_ready && now >= @session_started_at + 60
+          end
+          if @jobs.empty? && @idle_at && now - @idle_at >= 120
+            @process.stop(@session); @session = nil
+          end
+        rescue StandardError
+          @process.stop(@session) if @session
+          @session = nil
+        end
       end
       if @active
         job = @active
-        deadline = job[:ready_at] ? job[:ready_at] + 120 : job[:started_at] + 60
+        deadline = job[:ready_at] ? job[:ready_at] + 120 : (job[:startup_at] || job[:started_at]) + 60
         if now >= deadline
           finish(job, 'failed', 'renderer timeout')
           launch unless @active || @jobs.empty?
           return
         end
+        if job[:startup_at] && !job[:handshake_ready]
+          job[:handshake_ready] = @process.ready?(job[:handle])
+          return unless job[:handshake_ready]
+        end
         status = PreviewProtocol.owned_path(job[:directory], 'status.json')
         if @fs.file?(status)
           result = PreviewProtocol.validate_result(job[:request], job[:directory])
           if @process.respond_to?(:dispatch)
-            @session = job[:handle]; job[:handle] = nil; @idle_at = now
+            @session = job[:handle]; job[:handle] = nil; @idle_at = now; @session_started_at = nil; @session_ready = true
           else
             stop(job)
           end
@@ -83,13 +115,14 @@ module MafLibrary
           job[:handle] = nil
           finish(job, 'failed', 'renderer exited')
         else
+          @process.ready?(job[:handle]) if job[:startup_at] && @process.respond_to?(:ready?)
           ready = PreviewProtocol.owned_path(job[:directory], 'started.json')
           if @fs.file?(ready)
             started = JSON.parse(@fs.binread(ready))
             raise 'started identity mismatch' unless job[:request].all? { |k,v| started[k] == v } && started['state'] == 'running'
             job[:ready_at] ||= now
           end
-          deadline = job[:ready_at] ? job[:ready_at] + 120 : job[:started_at] + 60
+          deadline = job[:ready_at] ? job[:ready_at] + 120 : (job[:startup_at] || job[:started_at]) + 60
           finish(job, 'failed', 'renderer timeout') if now >= deadline
         end
       end
@@ -119,6 +152,7 @@ module MafLibrary
       job[:started_at] = now
       @session = nil if @session && !@process.alive?(@session)
       if @session
+        job[:startup_at] = @session_started_at
         job[:handle] = @session; @session = nil
         @process.dispatch(job[:handle], request_dir: job[:directory])
       else

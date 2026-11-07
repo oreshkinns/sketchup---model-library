@@ -114,3 +114,16 @@ class PreviewProcessTest
     @adapter.stop(handle)
   end
 end
+class PreviewProcessTest
+  def test_prepare_has_no_catalog_command_and_requires_owned_ready_identity
+    handle=@adapter.prepare(root:@dir)
+    session=@native.launch_args[:request_dir]
+    refute File.exist?(File.join(session,'command.json'))
+    refute @adapter.ready?(handle)
+    File.write(File.join(session,'ready.json'),JSON.generate({'token'=>handle.token,'pid'=>handle.pid}))
+    assert @adapter.ready?(handle)
+    File.write(File.join(session,'ready.json'),JSON.generate({'token'=>'wrong','pid'=>handle.pid}))
+    assert_raises(MafLibrary::PreviewProcess::OwnershipError){@adapter.ready?(handle)}
+    @adapter.stop(handle)
+  end
+end

@@ -185,7 +185,7 @@ class PreviewCoordinatorTest
     second=Dir[File.join(@dir,'session','request-*')].first
     File.write(File.join(second,'status.json'),'{}')
     MafLibrary::PreviewProtocol.stub(:validate_result,{png_path:'validated'}) { queue.tick }
-    @time=16; queue.tick
+    @time=120; queue.tick
     assert_equal 1,worker.stops
     queue.shutdown
   end
@@ -227,5 +227,92 @@ class PreviewCoordinatorTest
     assert_equal 2,worker.count
     assert_equal 1,worker.stops
     queue.shutdown
+  end
+end
+class PreviewCoordinatorTest
+  class PreparedWorker < Worker
+    attr_accessor :ready, :dead
+    attr_reader :dispatched
+    def prepare(root:); @count+=1; Object.new; end
+    def ready?(_); !!@ready; end
+    def alive?(_); !@dead; end
+    def dispatch(handle,request_dir:); @dispatched=handle; end
+  end
+  def prepared
+    @worker=PreparedWorker.new
+    @queue=MafLibrary::PreviewCoordinator.new(process:@worker,root:File.join(@dir,'jobs'),clock:-> {@time},event_sink:->(e){@events<<e})
+    @queue.prepare
+  end
+  def test_prepared_enqueue_shares_worker_and_original_startup_deadline
+    prepared; @time=59; @queue.enqueue(catalog:@catalog,id:'a'); @queue.tick
+    assert_equal 1,@worker.count; assert @worker.dispatched
+    @time=60; @queue.tick; assert_equal 'failed',@events.last[:state]; assert_equal 1,@worker.stops
+  end
+  def test_ready_idle_is_bounded_from_handshake_and_close_stops_warming
+    prepared; @time=40; @worker.ready=true; @queue.tick
+    @time=159; @queue.tick; assert_equal 0,@worker.stops
+    @time=160; @queue.tick; assert_equal 1,@worker.stops
+    @queue.tick; assert_equal 1,@worker.count
+    @queue.shutdown
+    prepared; @queue.shutdown; assert_equal 1,@worker.stops
+  end
+end
+
+
+class PreviewCoordinatorTest
+  def test_late_handshake_crash_and_invalid_handshake_close_owned_worker
+    prepared; @time=60; @worker.ready=true; @queue.tick
+    assert_equal 1,@worker.stops
+    prepared; @worker.dead=true; @queue.tick
+    assert_equal 0,@worker.stops
+    prepared; @worker.define_singleton_method(:ready?) { |_| raise 'invalid ready' }; @queue.tick
+    assert_equal 1,@worker.stops
+  end
+end
+
+class PreviewCoordinatorTest
+  def test_ready_worker_after_sixty_seconds_keeps_same_handle
+    prepared; @time=10; @worker.ready=true; @queue.tick
+    @time=70; @queue.enqueue(catalog:@catalog,id:'a'); @queue.tick; @queue.tick
+    assert_equal 1,@worker.count
+    assert_equal 0,@worker.stops
+    assert @worker.dispatched
+  end
+  def test_real_process_reaps_dead_prewarm_then_cold_falls_back
+    native=Object.new
+    native.define_singleton_method(:launch) { |**_| {pid:77,process:9,desktop:10,creation_time:123} }
+    native.define_singleton_method(:creation_time) { |_| 123 }
+    native.define_singleton_method(:alive?) { |_| false }
+    native.define_singleton_method(:close) { |*_| }
+    native.define_singleton_method(:retry_cleanup) { }
+    seed=File.join(@dir,'seed.skp'); File.write(seed,'seed')
+    adapter=MafLibrary::PreviewProcess.new(executable:'fake',worker_script:'fake',startup_template:seed,native:native)
+    queue=MafLibrary::PreviewCoordinator.new(process:adapter,root:File.join(@dir,'actual'),clock:-> {@time})
+    queue.prepare; queue.tick
+    assert_nil queue.instance_variable_get(:@session)
+    queue.enqueue(catalog:@catalog,id:'a'); queue.tick
+    assert queue.instance_variable_get(:@active)[:handle]
+  end
+end
+
+class PreviewCoordinatorTest
+  def test_warming_result_cannot_bypass_missing_handshake
+    prepared; @queue.enqueue(catalog:@catalog,id:'a'); @queue.tick
+    job=@queue.instance_variable_get(:@active)
+    File.write(File.join(job[:directory],'status.json'),'{}')
+    @queue.tick
+    assert_equal 'running',@events.last[:state]
+    @time=60; @queue.tick
+    assert_equal 'failed',@events.last[:state]
+    assert_equal 1,@worker.stops
+  end
+  def test_invalid_warming_handshake_fails_before_result
+    prepared; @queue.enqueue(catalog:@catalog,id:'a'); @queue.tick
+    job=@queue.instance_variable_get(:@active)
+    File.write(File.join(job[:directory],'status.json'),'{}')
+    @worker.define_singleton_method(:ready?) { |_| raise 'invalid ready' }
+    @queue.tick
+    assert_equal 'failed',@events.last[:state]
+    assert_equal 1,@worker.stops
   end
 end

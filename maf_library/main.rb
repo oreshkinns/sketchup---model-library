@@ -442,6 +442,7 @@ module MafLibrary
       attach_report_observer
       attach_selection_observer
       mark_report_stale
+      prewarm_preview
       refresh_catalog(nil)
     end
 
@@ -712,6 +713,7 @@ module MafLibrary
     def panel_closed
       @preview_coordinator&.shutdown
       @preview_coordinator = nil
+      @preview_prewarm_attempted = false
       @preview_requests = {}
       UI.stop_timer(@preview_timer) if @preview_timer
       @preview_timer = nil
@@ -838,6 +840,34 @@ module MafLibrary
       refresh_catalog("Папка проверена: добавлено #{result[:added]}, обновлено #{result[:updated]}.")
     end
 
+    def preview_prewarm_supported?
+      Sketchup.respond_to?(:platform) && Sketchup.platform == :platform_win &&
+        Sketchup.respond_to?(:version) && Sketchup.version.to_i >= 21
+    end
+
+    def prewarm_preview
+      return if @panel_closed || @preview_prewarm_attempted || !preview_prewarm_supported?
+      @preview_prewarm_attempted = true
+      ensure_preview_coordinator.prepare
+    rescue StandardError, NotImplementedError
+      # Opening the catalog must remain available if background startup fails.
+      nil
+    end
+
+    def ensure_preview_coordinator
+      return @preview_coordinator if @preview_coordinator
+      raise 'Фоновое превью доступно только в Windows' unless RUBY_PLATFORM =~ /mswin|mingw/
+      process = PreviewProcess.new(worker_script: File.join(__dir__, 'preview_worker.rb'),
+                                   startup_template: File.join(__dir__, 'assets', 'preview-startup.skp'))
+      @preview_coordinator = PreviewCoordinator.new(process: process, root: @settings.preview_worker_root,
+        event_sink: method(:preview_event))
+      @preview_timer = UI.start_timer(0.25, true) do
+        @preview_coordinator&.tick
+        refill_pending_previews if @preview_refill_needed
+      end
+      @preview_coordinator
+    end
+
     def queue_preview(catalog, id, explicit: false)
       scope = catalog.preview_scope
       raise ArgumentError, 'Неизвестная библиотека превью' unless Settings::SCOPES.include?(scope)
@@ -852,17 +882,7 @@ module MafLibrary
         @preview_coordinator.cancel(previous)
       end
       return unless entry && (explicit || Catalog.automatic_preview_needed?(entry))
-      unless @preview_coordinator
-        raise 'Фоновое превью доступно только в Windows' unless RUBY_PLATFORM =~ /mswin|mingw/
-        process = PreviewProcess.new(worker_script: File.join(__dir__, 'preview_worker.rb'),
-                                     startup_template: File.join(__dir__, 'assets', 'preview-startup.skp'))
-        @preview_coordinator = PreviewCoordinator.new(process: process, root: @settings.preview_worker_root,
-          event_sink: method(:preview_event))
-        @preview_timer = UI.start_timer(0.25, true) do
-          @preview_coordinator&.tick
-          refill_pending_previews if @preview_refill_needed
-        end
-      end
+      ensure_preview_coordinator
       @preview_attempted ||= {}
       return if !explicit && @preview_attempted[key] == signature
       unless explicit || @preview_coordinator.capacity?

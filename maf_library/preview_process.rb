@@ -15,18 +15,32 @@ module MafLibrary
     def start(request_dir:, token:)
       raise ArgumentError, 'empty token' if token.to_s.empty?
       directory = File.realpath(request_dir)
-      session = Dir.mktmpdir('session-', File.dirname(directory))
+      handle = prepare(root: File.dirname(directory))
+      session = @sessions.fetch(handle.object_id)
+      PreviewProtocol.atomic_json(session, 'command.json', {'directory'=>File.basename(directory), 'token'=>handle.token})
+      handle
+    end
+    def prepare(root:)
+      session = Dir.mktmpdir('session-', File.realpath(root))
       startup = File.join(session, 'startup.skp')
       FileUtils.cp(@startup_template, startup)
       script = File.join(session, 'bootstrap.rb')
       File.write(script, "require 'json'\nrequire #{@worker_script.dump}\nMafLibrary::PreviewWorker.run_session(__dir__)\n")
       session_token = SecureRandom.hex(32)
-      PreviewProtocol.atomic_json(session, 'command.json', {'directory'=>File.basename(directory), 'token'=>session_token})
       data = @native.launch(executable: @executable, arguments: [startup, '-RubyStartup', script], token: session_token, request_dir: session)
       handle = Handle.new(data[:pid], data[:creation_time], session_token.dup.freeze, data[:process], data[:desktop]).freeze
       (@sessions ||= {})[handle.object_id] = File.realpath(session)
       @owned[handle.object_id] = handle
       handle
+    end
+    def ready?(handle)
+      verify!(handle)
+      path = PreviewProtocol.owned_path(@sessions.fetch(handle.object_id), 'ready.json')
+      return false unless File.file?(path)
+      raise OwnershipError, 'ready size' if File.size(path) > 16384
+      data = JSON.parse(File.binread(path))
+      raise OwnershipError, 'ready identity mismatch' unless data == {'token'=>handle.token, 'pid'=>handle.pid}
+      true
     end
     def dispatch(handle, request_dir:)
       verify!(handle)
