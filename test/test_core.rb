@@ -591,32 +591,6 @@ class ProjectActionsTest < Minitest::Test
   end
 end
 
-class UpdaterTest < Minitest::Test
-  def test_offers_newer_release_with_matching_archive_and_digest
-    updater = MafLibrary::Updater.new('oreshkinns/sketchup---model-library', '0.2.0')
-    release = {'tag_name' => 'v0.3.0', 'html_url' => 'https://github.com/oreshkinns/sketchup---model-library/releases/tag/v0.3.0',
-      'assets' => [{'name' => 'maf_library-0.3.0.rbz', 'browser_download_url' =>
-        'https://github.com/oreshkinns/sketchup---model-library/releases/download/v0.3.0/maf_library-0.3.0.rbz',
-        'digest' => 'sha256:' + 'a' * 64, 'size' => 12000}]}
-    result = updater.parse_release(JSON.generate(release))
-    assert_equal '0.3.0', result[:version]
-    assert_equal 'a' * 64, result[:sha256]
-  end
-
-  def test_ignores_older_release
-    updater = MafLibrary::Updater.new('oreshkinns/sketchup---model-library', '0.2.0')
-    assert_nil updater.parse_release(JSON.generate({'tag_name' => 'v0.1.0', 'assets' => []}))
-  end
-
-  def test_rejects_asset_from_other_repository
-    updater = MafLibrary::Updater.new('oreshkinns/sketchup---model-library', '0.2.0')
-    release = {'tag_name' => 'v0.3.0', 'assets' => [{'name' => 'maf_library-0.3.0.rbz',
-      'browser_download_url' => 'https://github.com/other/repo/releases/download/v0.3.0/maf_library-0.3.0.rbz',
-      'digest' => 'sha256:' + 'a' * 64, 'size' => 12000}]}
-    assert_raises(MafLibrary::Updater::InvalidRelease) { updater.parse_release(JSON.generate(release)) }
-  end
-end
-
 class CloudCatalogTest < Minitest::Test
   def test_refresh_and_cache_skp_with_verified_checksum
     Dir.mktmpdir do |dir|

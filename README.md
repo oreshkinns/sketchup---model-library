@@ -4,11 +4,24 @@
 
 ## Установка
 
-1. Скачайте [maf_library-0.14.13.rbz](dist/maf_library-0.14.13.rbz).
+1. Скачайте [maf_library-0.14.15.rbz](dist/maf_library-0.14.15.rbz).
 2. В SketchUp откройте **Extensions → Extension Manager → Install Extension** и выберите файл `.rbz`.
 3. Откройте **МАФ Каталог** кнопкой на панели инструментов SketchUp. Панель инструментов можно перетащить и закрепить в удобном месте; пункт **Extensions → МАФ Каталог** также доступен.
 
 Архив пока не подписан для Extension Warehouse. Для локального тестирования SketchUp может запросить разрешение на загрузку неподписанного расширения.
+
+## Обновление 0.14.15 — доступ через установленный менеджер
+
+Обновления используют локальный ключ установленного ALEN Plugins Manager только для production-сборки менеджера (`release_source.json` указывает `https://arch.gratsmc.ru`). Ключ не включается в RBZ или исходники. Если менеджер не настроен, установщик доступен вручную после входа в [Центр ПО](https://arch.gratsmc.ru/tools/software-center/maf-library).
+
+## Обновление 0.14.14 — распространение через ArchTools
+
+Установщик и последующие обновления публикуются в [Центре ПО ArchTools](https://arch.gratsmc.ru/tools/software-center/maf-library).
+Встроенная проверка использует API менеджера SketchUp v2, выбирает рекомендованный совместимый stable RBZ и проверяет его размер и SHA-256 перед установкой. Установка требует подтверждения; после установки перезапустите SketchUp.
+
+Старые версии до 0.14.14 проверяют GitHub: для перехода установите этот RBZ вручную либо получите переходный выпуск, пока прежний GitHub-канал доступен. Закрытие GitHub-репозитория — отдельный шаг после перехода пользователей. Настройка облачной библиотеки независима от установщика: перед закрытием GitHub проверьте её manifest и ссылки на модели, использующие raw.githubusercontent.com/GitHub.
+
+Публикация нового выпуска: собрать `scripts/build.ps1`, загрузить `dist/maf_library-<версия>.rbz` как основной RBZ карточки `maf-library`, опубликовать и проверить скачанный размер/SHA. Корневой загрузчик менеджера: `maf_library.rb`; имя расширения: `МАФ Каталог`. Контракты и операторская инструкция находятся в `D:/!AI_projects/archtools-site/docs/integrations/alen-plugins-manager-v2.md` и `docs/operations/software-publishing.md` того же проекта. Исходники остаются в GitHub; установщик публикуется в ArchTools.
 
 ## Обновление 0.14.13 — инструменты раскладки
 
@@ -263,7 +276,7 @@ ruby test/test_core.rb
 bash build.sh
 ```
 
-API: [SketchUp Ruby API](https://ruby.sketchup.com/), [GitHub Releases API](https://docs.github.com/en/rest/releases/assets).
+API: [SketchUp Ruby API](https://ruby.sketchup.com/), [ArchTools](https://arch.gratsmc.ru/tools/software-center/maf-library).
 
 ## Локальное распознавание и библиотека
 

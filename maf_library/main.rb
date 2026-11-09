@@ -1815,7 +1815,7 @@ module MafLibrary
     end
 
     def check_update
-      updater = Updater.new(RELEASE_REPOSITORY, VERSION)
+      updater = Updater.new(VERSION)
       @available_update = updater.check
       if @available_update
         push(update: @available_update, message: "Доступна версия #{@available_update[:version]}.")
@@ -1826,7 +1826,7 @@ module MafLibrary
 
     def install_update
       raise 'Сначала проверьте обновления' unless @available_update
-      installed = Updater.new(RELEASE_REPOSITORY, VERSION).install(@available_update)
+      installed = Updater.new(VERSION).install(@available_update)
       push(message: installed ? 'Обновление установлено. Перезапустите SketchUp.' : 'Установка обновления не выполнена.')
     rescue Interrupt
       push(message: 'Установка обновления отменена.')
