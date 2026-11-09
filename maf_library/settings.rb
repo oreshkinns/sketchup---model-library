@@ -8,6 +8,8 @@ module MafLibrary
   class Settings
     DEFAULT_SECTIONS = ['Скамейки', 'Урны', 'Светильники', 'Площадки', 'Другое'].freeze
     SCOPES = %w[personal shared].freeze
+    DEFAULT_CLOUD_URL = 'https://arch.gratsmc.ru/assets/maf-library/cloud/manifest.json'.freeze
+    LEGACY_CLOUD_URL = 'https://raw.githubusercontent.com/oreshkinns/sketchup---model-library/main/cloud-library/manifest.json'.freeze
 
     def initialize(file, personal:, shared:)
       @file = file
@@ -83,7 +85,8 @@ module MafLibrary
     end
 
     def cloud_url
-      data['cloud_url'].to_s
+      url = data['cloud_url'].to_s
+      url.empty? || url == LEGACY_CLOUD_URL ? DEFAULT_CLOUD_URL : url
     end
 
     def cloud_favorite?(id)

@@ -4,7 +4,7 @@ require 'extensions.rb'
 
 module MafLibrary
   EXTENSION_NAME = 'МАФ Каталог'.freeze
-  VERSION = '0.14.15'.freeze
+  VERSION = '0.14.16'.freeze
 end
 
 unless file_loaded?(__FILE__)

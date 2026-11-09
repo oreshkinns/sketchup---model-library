@@ -50,7 +50,7 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=Path("cloud-library"))
     parser.add_argument(
         "--base-url",
-        default="https://raw.githubusercontent.com/oreshkinns/sketchup---model-library/main/cloud-library",
+        default="https://arch.gratsmc.ru/assets/maf-library/cloud",
     )
     args = parser.parse_args()
     root = args.root.resolve()
