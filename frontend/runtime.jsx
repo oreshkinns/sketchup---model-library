@@ -1586,11 +1586,11 @@ export function initializeRuntime() {
       {
         overview: "Обзор модели",
         duplicates: "Поиск дублей",
-        catalog: "Библиотека МАФ",
+        catalog: "Библиотека",
         sections: "Разделы МАФ",
         cleanup: "Очистка модели",
         settings: "Настройки",
-      }[name] || "МАФ Каталог";
+      }[name] || "Библиотека элементов благоустройства";
     render();
     if (name === "duplicates" && !demo && !state.report_stale) {
       const button = Array.from(

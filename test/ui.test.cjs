@@ -304,7 +304,7 @@ test('library is first navigation and initial page, with separate add controls',
 const p=await open(t);
 assert.equal(await p.locator('.nav [data-page]').first().getAttribute('data-page'),'catalog');
 assert.equal(await p.locator('#catalog').isVisible(),true);
-assert.equal(await p.locator('#page-title').textContent(),'Библиотека МАФ');
+assert.equal(await p.locator('#page-title').textContent(),'Библиотека');
 assert.equal(await p.locator('#add-selected').textContent(),'Добавить выделенный в SketchUp');
 assert.match(await p.locator('#import').textContent(),/Добавить файл .skp/);
 });

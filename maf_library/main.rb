@@ -135,7 +135,7 @@ module MafLibrary
         @dialog.bring_to_front
         return
       end
-      @dialog = UI::HtmlDialog.new(dialog_title: 'МАФ Каталог', preferences_key: 'MafLibrary.Panel',
+      @dialog = UI::HtmlDialog.new(dialog_title: 'Библиотека элементов благоустройства', preferences_key: 'MafLibrary.Panel',
                                    width: 1120, height: 760, min_width: 620, min_height: 450,
                                    style: UI::HtmlDialog::STYLE_DIALOG)
       @dialog.set_file(File.join(__dir__, 'ui.html'))
@@ -1842,7 +1842,7 @@ module MafLibrary
     @controller ||= Controller.new
     unless file_loaded?(__FILE__)
       @controller.register_context_menu
-      UI.menu('Extensions').add_item('МАФ Каталог') { @controller.show }
+      UI.menu('Extensions').add_item('Библиотека элементов благоустройства') { @controller.show }
       @toolbar = ToolbarButton.install(@controller)
       file_loaded(__FILE__)
     end

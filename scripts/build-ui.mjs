@@ -23,7 +23,7 @@ await writeFile(
   new URL("../preview.html", import.meta.url),
   `<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>МАФ Каталог — модели, библиотека, аудит</title><style>${css}</style></head>
+<title>Библиотека элементов благоустройства — модели, библиотека, аудит</title><style>${css}</style></head>
 <body><div id="root"></div><script>${script}</script></body></html>\n`,
   "utf8",
 );

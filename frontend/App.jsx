@@ -20,8 +20,8 @@ export function Sidebar() {
           </svg>
         </div>
         <div>
-          <strong>{"МАФ Каталог"}</strong>
-          <small>{"БИБЛИОТЕКА МОДЕЛЕЙ"}</small>
+          <strong>{"Библиотека элементов"}</strong>
+          <small>{"благоустройства"}</small>
         </div>
       </div>
       {"\r\n    "}
@@ -148,7 +148,7 @@ export function Header() {
         <div className={"eyebrow"} id={"mode-label"}>
           {"ОТКРЫТЫЙ ПРОЕКТ · ДЕМО"}
         </div>
-        <h1 id={"page-title"}>{"Библиотека МАФ"}</h1>
+        <h1 id={"page-title"}>{"Библиотека"}</h1>
       </div>
       <div className={"top-actions"}>
         <button className={"button"} id={"scan"}>
