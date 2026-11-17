@@ -4,7 +4,7 @@ require 'extensions.rb'
 
 module MafLibrary
   EXTENSION_NAME = 'Библиотека элементов благоустройства'.freeze
-  VERSION = '0.14.17'.freeze
+  VERSION = '0.14.18'.freeze
 end
 
 unless file_loaded?(__FILE__)

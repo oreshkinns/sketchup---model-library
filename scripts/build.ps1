@@ -22,10 +22,16 @@ try {
         Copy-Item -Destination (Join-Path $stagingPath 'maf_library\icons')
     Copy-Item -LiteralPath (Join-Path $projectRoot 'maf_library\assets') -Destination (Join-Path $stagingPath 'maf_library\assets') -Recurse
     Copy-Item -LiteralPath (Join-Path $projectRoot 'preview.html') -Destination (Join-Path $stagingPath 'maf_library\ui.html')
-    [System.IO.Compression.ZipFile]::CreateFromDirectory($stagingPath, $archivePath)
+    $writer = [System.IO.Compression.ZipFile]::Open($archivePath, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        Get-ChildItem -LiteralPath $stagingPath -File -Recurse | ForEach-Object {
+            $entryName = $_.FullName.Substring($stagingPath.Length + 1).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($writer, $_.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    } finally { $writer.Dispose() }
     $archive = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
     try {
-        $paths = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+        $paths = @($archive.Entries | ForEach-Object { $_.FullName.Replace([System.IO.Path]::DirectorySeparatorChar, '/') })
         if ('maf_library.rb' -notin $paths -or 'maf_library/ui.html' -notin $paths) { throw 'Invalid RBZ structure' }
     } finally { $archive.Dispose() }
     New-Item -ItemType Directory -Path (Join-Path $projectRoot 'dist') -Force | Out-Null
