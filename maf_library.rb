@@ -3,8 +3,9 @@ require 'sketchup.rb'
 require 'extensions.rb'
 
 module MafLibrary
-  EXTENSION_NAME = 'Библиотека элементов благоустройства'.freeze
-  VERSION = '0.14.18'.freeze
+  # Preserve the registered identity used by ArchTools inventory.
+  EXTENSION_NAME = 'МАФ Каталог'.freeze
+  VERSION = '0.14.19'.freeze
 end
 
 unless file_loaded?(__FILE__)
